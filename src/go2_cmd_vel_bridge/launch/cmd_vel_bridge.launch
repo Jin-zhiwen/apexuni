@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<launch>
+  <arg name="network_interface" default="enp2s0" doc="Network interface for DDS communication (e.g., enp2s0)"/>
+  <arg name="domain_id" default="0" doc="DDS domain ID for GO2 robot (0 or 1)"/>
+  <arg name="max_vx" default="0.25" doc="Maximum forward velocity (m/s)"/>
+  <arg name="max_vy" default="0.15" doc="Maximum lateral velocity (m/s)"/>
+  <arg name="max_yaw" default="0.5" doc="Maximum angular velocity (rad/s)"/>
+  <arg name="cmd_timeout" default="0.5" doc="Command timeout in seconds"/>
+  <arg name="publish_rate" default="50.0" doc="Command publishing rate in Hz"/>
+  <arg name="auto_stand" default="true" doc="Auto-stand robot on startup"/>
+  <arg name="cyclonedds_uri" default="" doc="Optional path to a CycloneDDS XML config file"/>
+
+  <node pkg="go2_cmd_vel_bridge" type="cmd_vel_to_go2_bridge" name="cmd_vel_to_go2_bridge" output="screen">
+    <param name="network_interface" value="$(arg network_interface)"/>
+    <param name="domain_id" value="$(arg domain_id)"/>
+    <param name="max_vx" value="$(arg max_vx)"/>
+    <param name="max_vy" value="$(arg max_vy)"/>
+    <param name="max_yaw" value="$(arg max_yaw)"/>
+    <param name="cmd_timeout" value="$(arg cmd_timeout)"/>
+    <param name="publish_rate" value="$(arg publish_rate)"/>
+    <param name="auto_stand" value="$(arg auto_stand)"/>
+    <param name="cyclonedds_uri" value="$(arg cyclonedds_uri)"/>
+  </node>
+</launch>

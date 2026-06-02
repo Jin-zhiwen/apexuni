@@ -84,6 +84,7 @@ private:
 
   // MPC function
   void getLinearModel(const MPCState& s);
+  double estimateReferenceSpeed(const std::vector<Eigen::Vector3d>& ref_points, int index) const;
   void stateTrans(MPCState& s, double v, double yaw_dot);
   void predictMotion(void);
   void predictMotion(MPCState* b);

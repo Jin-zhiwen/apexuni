@@ -54,6 +54,7 @@ void SDFMap2D::initMap(ros::NodeHandle& nh)
   nh.param("sdf_map/p_max", mp_->p_max_, 0.97);
   nh.param("sdf_map/p_occ", mp_->p_occ_, 0.80);
   nh.param("sdf_map/max_ray_length", mp_->max_ray_length_, -0.1);
+  nh.param("sdf_map/ray_stop_dilation", mp_->ray_stop_dilation_, 0);
 
   // Check if using habitat simulator and override parameters if necessary
   bool is_real_world;
@@ -133,6 +134,8 @@ void SDFMap2D::setCacheOccupancy(const int& adr, const int& occ)
 
 void SDFMap2D::inputVirtualGround(const pcl::PointCloud<pcl::PointXY>::Ptr& points)
 {
+  std::fill(md_->virtual_ground_buffer_.begin(), md_->virtual_ground_buffer_.end(), 0);
+
   int point_num = points->points.size();
   if (point_num == 0)
     return;
@@ -166,12 +169,14 @@ void SDFMap2D::inputObjectCloud2D(
   }
 }
 
-void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& points,
-    const Eigen::Vector3d& camera_pos, vector<Eigen::Vector2i>& free_grids)
+void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
+    const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
+    vector<Eigen::Vector2i>& free_grids)
 {
   free_grids.clear();
-  int point_num = points->points.size();
-  if (point_num == 0)
+  int occupied_point_num = occupied_points->points.size();
+  int raycast_point_num = raycast_points->points.size();
+  if (occupied_point_num == 0 && raycast_point_num == 0)
     return;
     
   // Initialize raycast tracking and clear occupancy updates
@@ -196,11 +201,11 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
   Eigen::Vector2i idx;
   int vox_adr;
   double length;
-  std::unordered_map<int, char> flag_occ, flag_free;
+  std::unordered_map<int, char> flag_occ, flag_occ_stop, flag_free;
 
-  // First pass: Mark all occupied grids from depth points
-  for (int i = 0; i < point_num; ++i) {
-    auto& pt = points->points[i];
+  // First pass: Mark occupied grids only from obstacle-height depth points.
+  for (int i = 0; i < occupied_point_num; ++i) {
+    auto& pt = occupied_points->points[i];
     pt_w << pt.x, pt.y;
     int tmp_flag;
     
@@ -224,13 +229,31 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
     }
     posToIndex(pt_w, idx);
     vox_adr = toAddress(idx);
-    if (tmp_flag)
+    if (tmp_flag) {
       flag_occ[vox_adr] = 1;  // Mark as occupied in hash map
+      flag_occ_stop[vox_adr] = 1;
+
+      if (mp_->ray_stop_dilation_ > 0) {
+        for (int dx = -mp_->ray_stop_dilation_; dx <= mp_->ray_stop_dilation_; ++dx) {
+          for (int dy = -mp_->ray_stop_dilation_; dy <= mp_->ray_stop_dilation_; ++dy) {
+            if (dx == 0 && dy == 0)
+              continue;
+            if (std::abs(dx) + std::abs(dy) > mp_->ray_stop_dilation_)
+              continue;
+            Eigen::Vector2i stop_idx = idx + Eigen::Vector2i(dx, dy);
+            if (!isInMap(stop_idx))
+              continue;
+            flag_occ_stop[toAddress(stop_idx)] = 1;
+          }
+        }
+      }
+    }
   }
 
-  // Second pass: Perform raycasting to mark free space, excluding occupied grids
-  for (int i = 0; i < point_num; ++i) {
-    auto& pt = points->points[i];
+  // Second pass: Use all valid depth endpoints to clear free space. Ground and
+  // over-range rays must still clear stale occupied cells in traversable space.
+  for (int i = 0; i < raycast_point_num; ++i) {
+    auto& pt = raycast_points->points[i];
     pt_w << pt.x, pt.y;
     int tmp_flag;
     
@@ -254,8 +277,8 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
     }
     posToIndex(pt_w, idx);
     vox_adr = toAddress(idx);
-    if (tmp_flag == 1)
-      setCacheOccupancy(vox_adr, tmp_flag);
+    if (tmp_flag == 1 && flag_occ.count(vox_adr) && flag_occ[vox_adr] == 1)
+      setCacheOccupancy(vox_adr, 1);
 
     // Update the bounding box of affected area
     for (int k = 0; k < 2; ++k) {
@@ -281,8 +304,8 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
       }
       while (caster_->nextId(idx)) {
         int adr = toAddress(idx);
-        if (flag_occ.count(adr) && flag_occ[adr] == 1)  // Skip if marked as occupied
-          continue;
+        if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)  // Stop if hit occupied grid
+          break;
         if (md_->virtual_ground_buffer_[adr])  // Skip virtual ground
           continue;
         setCacheOccupancy(adr, 0);
@@ -302,8 +325,18 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
       caster_->input(sensor_pos, pt_w);
       while (caster_->nextId(idx)) {
         int adr = toAddress(idx);
-        if (flag_occ.count(adr) && flag_occ[adr] == 1)  // Stop if hit occupied grid
+        if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1) {  // Stop if hit occupied grid
+          if (flag_occ.count(adr) && flag_occ[adr] == 1)
+            break;
+          // Dilation-expanded stop cells are not true obstacle hits. Clear them once
+          // so the robot-side wall boundary does not remain permanently unknown.
+          setCacheOccupancy(adr, 0);
+          if (!flag_free.count(adr)) {
+            flag_free[adr] = 1;
+            free_grids.push_back(idx);
+          }
           break;
+        }
         if (md_->virtual_ground_buffer_[adr])  // Stop at virtual ground
           break;
         setCacheOccupancy(adr, 0);
@@ -342,9 +375,10 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
         md_->count_hit_[adr] >= md_->count_miss_[adr] ? mp_->prob_hit_log_ : mp_->prob_miss_log_;
     md_->count_hit_[adr] = md_->count_miss_[adr] = 0;
     
-    // Initialize unknown voxels with minimum occupancy
+    // Start newly observed voxels from a neutral prior so a single spurious hit
+    // does not immediately flip large unknown regions to occupied.
     if (md_->occupancy_buffer_[adr] < mp_->clamp_min_log_ - 1e-3)
-      md_->occupancy_buffer_[adr] = mp_->min_occupancy_log_;
+      md_->occupancy_buffer_[adr] = 0.0;
 
     // Update occupancy with clamping
     double last_occupancy = md_->occupancy_buffer_[adr];

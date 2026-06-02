@@ -1,26 +1,141 @@
 <launch>
   <!-- Real-world exploration launch file -->
 
-  <!-- size of map, change the size in x, y according to your application -->
   <arg name="map_size_x" value="80.0"/>
   <arg name="map_size_y" value="80.0"/>
+  <arg name="camera_height" value="0.43"/>
 
-  <!-- Real-world mode flag -->
   <arg name="is_real_world" default="true"/>
 
-  <!-- topic of your odometry such as VIO or LIO -->
-  <arg name="odom_topic" value="/habitat/odom" />
-  <!-- transform of camera frame in the world frame -->
-  <arg name="sensor_pose_topic" value="/habitat/sensor_pose"/>
-  <!-- depth image, 640x480 by default -->
-  <arg name="depth_topic" value="/habitat/camera_depth"/>
+  <!-- Raw Kimera VIO odometry. -->
+  <arg name="vio_odom_topic" value="/kimera_vio_ros/odometry"/>
+  <!-- Body-aligned odometry used by planning / control / RViz robot arrow. -->
+  <arg name="odom_topic" value="/kimera_vio_ros/body_odometry"/>
 
-  <!-- TODO: Load real-world specific configuration -->
-  <!-- <rosparam file="$(find exploration_manager)/config/real_world_params.yaml" command="load" /> -->
+  <!-- Mapping pose: odom -> camera_depth_optical_frame -->
+  <arg name="sensor_pose_topic" value="/camera/sensor_pose"/>
+
+  <!-- Depth image -->
+  <arg name="depth_topic" value="/camera/depth/image_rect_raw"/>
+
+  <arg name="cmd_vel_topic" value="/cmd_vel"/>
+  <arg name="need_init_rotation" default="false"/>
+  <arg name="base_frame" default="base_link"/>
+  <!-- Mapping must use the depth optical frame because /camera/depth/image_rect_raw
+       is published in camera_depth_optical_frame. -->
+  <arg name="camera_frame" default="camera_depth_optical_frame"/>
+  <!-- Kimera publishes a "base_link" that is close to the camera frame, not a robot body frame. -->
+  <!-- Build an explicit body-aligned frame so planning / control yaw is not off by 90 degrees. -->
+  <arg name="body_frame" default="kimera_base_link_body"/>
+  <arg name="publish_kimera_body_tf" default="true"/>
+  <arg name="kimera_body_parent" default="base_link"/>
+  <arg name="kimera_body_child" default="$(arg body_frame)"/>
+  <arg name="kimera_body_x" default="0.0"/>
+  <arg name="kimera_body_y" default="0.0"/>
+  <!-- Keep body origin colocated with Kimera base_link until physical center offset is measured. -->
+  <arg name="kimera_body_z" default="0.0"/>
+  <!-- Optical -> body: camera z-forward -> body x-forward, camera x-right -> body -y. -->
+  <arg name="kimera_body_yaw" default="0.0"/>
+  <arg name="kimera_body_pitch" default="-1.57079632679"/>
+  <arg name="kimera_body_roll" default="1.57079632679"/>
+  <!-- Connect Kimera's left_cam tree to the RealSense camera_link tree so that
+       camera_depth_optical_frame becomes reachable from base_link. -->
+  <arg name="publish_kimera_realsense_bridge_tf" default="true"/>
+  <arg name="kimera_realsense_bridge_parent" default="left_cam"/>
+  <arg name="kimera_realsense_bridge_child" default="camera_link"/>
+  <arg name="kimera_realsense_bridge_x" default="0.0"/>
+  <arg name="kimera_realsense_bridge_y" default="0.0"/>
+  <arg name="kimera_realsense_bridge_z" default="0.0"/>
+  <!-- Rotate camera_link so that left_cam aligns with RealSense depth optical frame. -->
+  <arg name="kimera_realsense_bridge_yaw" default="0.0"/>
+  <arg name="kimera_realsense_bridge_pitch" default="-1.57079632679"/>
+  <arg name="kimera_realsense_bridge_roll" default="1.57079632679"/>
+
+  <!-- Keep this disabled if Kimera / RealSense already publish the camera chain. -->
+  <arg name="publish_base_to_camera_tf" default="false"/>
+  <arg name="base_to_camera_x" default="0.20"/>
+  <arg name="base_to_camera_y" default="0.00"/>
+  <arg name="base_to_camera_z" default="0.35"/>
+  <arg name="base_to_camera_yaw" default="0"/>
+  <arg name="base_to_camera_pitch" default="0"/>
+  <arg name="base_to_camera_roll" default="0"/>
+
+  <!-- ========================================================= -->
+  <!-- Build a body-aligned frame from Kimera's optical-like base_link. -->
+  <!-- ========================================================= -->
+  <node pkg="tf2_ros"
+        type="static_transform_publisher"
+        name="kimera_body_tf"
+        if="$(arg publish_kimera_body_tf)"
+        args="$(arg kimera_body_x) $(arg kimera_body_y) $(arg kimera_body_z) $(arg kimera_body_yaw) $(arg kimera_body_pitch) $(arg kimera_body_roll) $(arg kimera_body_parent) $(arg kimera_body_child)"/>
+
+  <!-- ========================================================= -->
+  <!-- Bridge Kimera's stereo frame tree to RealSense's camera tree. -->
+  <!-- For the RealSense IR launch, left_cam is typically aligned with infra1. -->
+  <!-- ========================================================= -->
+  <node pkg="tf2_ros"
+        type="static_transform_publisher"
+        name="kimera_realsense_bridge"
+        if="$(arg publish_kimera_realsense_bridge_tf)"
+        args="$(arg kimera_realsense_bridge_x) $(arg kimera_realsense_bridge_y) $(arg kimera_realsense_bridge_z) $(arg kimera_realsense_bridge_yaw) $(arg kimera_realsense_bridge_pitch) $(arg kimera_realsense_bridge_roll) $(arg kimera_realsense_bridge_parent) $(arg kimera_realsense_bridge_child)"/>
+
+  <!-- ========================================================= -->
+  <!-- Static TF: base_link -> camera_link                       -->
+  <!--                                                          -->
+  <!-- 这里的 xyz 必须改成相机在机器人上的真实安装位置。             -->
+  <!-- 先用示例值让链路贯通，后面再精调外参。                         -->
+  <!--                                                          -->
+  <!-- args: x y z yaw pitch roll parent child                   -->
+  <!-- ========================================================= -->
+  <node pkg="tf2_ros"
+        type="static_transform_publisher"
+        name="base_link_to_camera_link"
+        if="$(arg publish_base_to_camera_tf)"
+        args="$(arg base_to_camera_x) $(arg base_to_camera_y) $(arg base_to_camera_z) $(arg base_to_camera_yaw) $(arg base_to_camera_pitch) $(arg base_to_camera_roll) $(arg base_frame) camera_link"/>
+
+  <!-- 如果 algorithm_traj.xml 里 map_ros/frame_id 还是 world，就保留这个。
+       如果你已经把 map_ros/frame_id 改成 odom，可以删掉。 -->
+  <node pkg="tf2_ros"
+        type="static_transform_publisher"
+        name="world_to_odom"
+        args="0 0 0 0 0 0 world odom"/>
+
+  <!-- ========================================================= -->
+  <!-- Convert odom->base_link to odom->camera_depth_optical_frame -->
+  <!-- ========================================================= -->
+  <node pkg="exploration_manager"
+        name="camera_pose_converter"
+        type="camera_pose_tf_converter.py"
+        output="screen">
+
+    <param name="input_topic" value="$(arg vio_odom_topic)" type="str"/>
+    <param name="output_topic" value="$(arg sensor_pose_topic)" type="str"/>
+
+    <param name="base_frame" value="$(arg base_frame)" type="str"/>
+    <param name="camera_frame" value="$(arg camera_frame)" type="str"/>
+    <param name="odom_frame" value="odom" type="str"/>
+
+    <param name="tf_timeout" value="0.5" type="double"/>
+  </node>
+
+  <!-- Convert Kimera optical-like odometry into a body-aligned odometry. -->
+  <node pkg="exploration_manager"
+        name="body_odom_converter"
+        type="camera_pose_tf_converter.py"
+        output="screen">
+
+    <param name="input_topic" value="$(arg vio_odom_topic)" type="str"/>
+    <param name="output_topic" value="$(arg odom_topic)" type="str"/>
+
+    <param name="base_frame" value="$(arg base_frame)" type="str"/>
+    <param name="camera_frame" value="$(arg body_frame)" type="str"/>
+    <param name="odom_frame" value="odom" type="str"/>
+
+    <param name="tf_timeout" value="0.5" type="double"/>
+  </node>
 
   <!-- main algorithm params -->
   <include file="$(find exploration_manager)/launch/algorithm_traj.xml">
-    <!-- Pass real-world flag to exploration node -->
     <arg name="is_real_world_" value="$(arg is_real_world)"/>
 
     <arg name="map_size_x_" value="$(arg map_size_x)"/>
@@ -29,28 +144,31 @@
     <arg name="odometry_topic_" value="$(arg odom_topic)"/>
     <arg name="sensor_pose_topic_" value="$(arg sensor_pose_topic)"/>
     <arg name="depth_topic_" value="$(arg depth_topic)"/>
+    <arg name="camera_height_" value="$(arg camera_height)"/>
 
-    <!-- intrinsic params of the depth camera - TODO: update for your camera -->
-    <arg name="cx_" value="320"/>
-    <arg name="cy_" value="240"/>
-    <arg name="fx_" value="388.1910413097385"/>
-    <arg name="fy_" value="422.0475153598262"/>
+    <arg name="cx_" value="321.85455322265625"/>
+    <arg name="cy_" value="239.4015350341797"/>
+    <arg name="fx_" value="385.2499084472656"/>
+    <arg name="fy_" value="385.2499084472656"/>
   </include>
 
-  <!-- Trajectory server for real robot control -->
-  <node pkg="trajectory_manager" name="traj_server_node" type="traj_server" output="screen">
-    <rosparam file="$(find trajectory_manager)/config/control_param.yaml" command="load" />
+  <!-- Trajectory server -->
+  <node pkg="trajectory_manager"
+        name="traj_server_node"
+        type="traj_server"
+        output="screen">
+
+    <rosparam file="$(find trajectory_manager)/config/control_param.yaml" command="load"/>
+
     <remap from="~odometry" to="$(arg odom_topic)"/>
     <remap from="~trajectory" to="/planning/trajectory"/>
-    <remap from="~cmd_vel" to="/cmd_vel"/>
+    <remap from="~cmd_vel" to="$(arg cmd_vel_topic)"/>
 
-    <!-- Real-world specific parameters -->
-    <param name="need_init" value="false" type="bool"/>
-    <param name="max_correction_vel" value="1.0" type="double"/>
-    <param name="max_correction_omega" value="1.57" type="double"/>
+    <!-- Reuse the existing traj_server init rotation so the robot scans once
+         before normal exploration / object navigation begins. -->
+    <param name="need_init" value="$(arg need_init_rotation)" type="bool"/>
+    <param name="max_correction_vel" value="0.80" type="double"/>
+    <param name="max_correction_omega" value="1.20" type="double"/>
   </node>
-
-  <!-- TODO: Add additional real-world nodes if needed -->
-  <!-- e.g., localization, sensor drivers, safety monitors, etc. -->
 
 </launch>

@@ -40,6 +40,28 @@ void MPC::setOdom(const Eigen::Vector4d& car_state)
   now_state.v = car_state(3);
 }
 
+double MPC::estimateReferenceSpeed(
+    const std::vector<Eigen::Vector3d>& ref_points, int index) const
+{
+  if (ref_points.size() < 2) {
+    return 0.0;
+  }
+
+  const int next_index = std::min(index + 1, static_cast<int>(ref_points.size()) - 1);
+  const int prev_index = std::max(index - 1, 0);
+  Eigen::Vector2d delta;
+  double sample_dt = dt;
+  if (next_index != index) {
+    delta = ref_points[next_index].head<2>() - ref_points[index].head<2>();
+  }
+  else {
+    delta = ref_points[index].head<2>() - ref_points[prev_index].head<2>();
+  }
+
+  const double speed = delta.norm() / std::max(1.0e-3, sample_dt);
+  return std::max(min_speed, std::min(max_speed, speed));
+}
+
 Eigen::Vector2d MPC::calCmd(const std::vector<Eigen::Vector3d>& _xref)
 {
   std_msgs::Float64 err;
@@ -49,7 +71,7 @@ Eigen::Vector2d MPC::calCmd(const std::vector<Eigen::Vector3d>& _xref)
     xref(0, i) = _xref[i](0);
     xref(1, i) = _xref[i](1);
     xref(3, i) = _xref[i](2);
-    dref(0, i) = 0.0;
+    dref(0, i) = estimateReferenceSpeed(_xref, i);
     dref(1, i) = 0.0;
   }
   smooth_yaw();

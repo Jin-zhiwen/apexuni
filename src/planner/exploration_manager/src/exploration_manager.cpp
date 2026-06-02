@@ -69,6 +69,16 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   Vector2d pos2d = Vector2d(pos(0), pos(1));
   ros::Time t1 = ros::Time::now();
   auto t2 = t1;
+  const bool skip_object_navigation = skip_object_navigation_once_;
+  skip_object_navigation_once_ = false;
+  const bool close_object_approach = close_object_approach_once_;
+  close_object_approach_once_ = false;
+  if (skip_object_navigation) {
+    ROS_WARN("[Navigation Mode] Skipping object navigation once after unverified or unreachable target.");
+  }
+  if (close_object_approach) {
+    ROS_WARN("[Navigation Mode] Using close object approach because LightGlue status was PENDING_FAR.");
+  }
 
   // Clear previous planning results
   ed_->tsp_tour_.clear();
@@ -77,21 +87,34 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   sdf_map_->object_map2d_->getTopConfidenceObjectCloud(object_clouds);
 
   // ==================== Navigation Mode: High-Confidence Objects ====================
-  if (!object_clouds.empty()) {
+  if (!skip_object_navigation && !object_clouds.empty()) {
     ROS_WARN("[Navigation Mode] Get object_cloud num = %ld", object_clouds.size());
+
+    // When LightGlue says the target is correct but still far, prefer the latest
+    // detector cloud over the fused object map so old object cells do not trap us.
+    if (close_object_approach && object_map2d_->all_object_clouds_ &&
+        !object_map2d_->all_object_clouds_->points.empty()) {
+      ROS_WARN("[Navigation Mode] Using latest detector object cloud for close approach, points = %ld",
+          object_map2d_->all_object_clouds_->points.size());
+      if (searchObjectPath(
+              pos, object_map2d_->all_object_clouds_, ed_->next_pos_, ed_->next_best_path_, true))
+        return SEARCH_BEST_OBJECT;
+    }
 
     // Try to find path to each detected object in order of confidence
     for (auto object_cloud : object_clouds) {
-      if (searchObjectPath(pos, object_cloud, ed_->next_pos_, ed_->next_best_path_))
+      if (searchObjectPath(
+              pos, object_cloud, ed_->next_pos_, ed_->next_best_path_, close_object_approach))
         return SEARCH_BEST_OBJECT;
     }
   }
 
   // ==================== Navigation Mode: Over-Depth Objects ====================
-  if (!object_map2d_->over_depth_object_cloud_->points.empty()) {
+  if (!skip_object_navigation && !object_map2d_->over_depth_object_cloud_->points.empty()) {
     ROS_WARN("[Navigation Mode (Over Depth)] Get over depth object cloud");
     if (searchObjectPath(
-            pos, object_map2d_->over_depth_object_cloud_, ed_->next_pos_, ed_->next_best_path_))
+            pos, object_map2d_->over_depth_object_cloud_, ed_->next_pos_, ed_->next_best_path_,
+            close_object_approach))
       return SEARCH_OVER_DEPTH_OBJECT;
   }
 
@@ -112,8 +135,9 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
     ROS_WARN("Maybe no passable frontier.");
 
     // Try suspicious objects as backup
-    if (!top_object_cloud->points.empty() &&
-        searchObjectPath(pos, top_object_cloud, ed_->next_pos_, ed_->next_best_path_))
+    if (!skip_object_navigation && !top_object_cloud->points.empty() &&
+        searchObjectPath(
+            pos, top_object_cloud, ed_->next_pos_, ed_->next_best_path_, close_object_approach))
       return SEARCH_SUSPICIOUS_OBJECT;
     else
       // Try dormant frontiers as last resort
@@ -125,29 +149,31 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
       ROS_ERROR("search exterme case!!!");
 
       // Try extreme object search with relaxed constraints
-      for (auto object_cloud : object_clouds) {
-        if (!object_cloud->points.empty() &&
-            searchObjectPathExtreme(pos, object_cloud, ed_->next_pos_, ed_->next_best_path_))
+      if (!skip_object_navigation) {
+        for (auto object_cloud : object_clouds) {
+          if (!object_cloud->points.empty() &&
+              searchObjectPathExtreme(pos, object_cloud, ed_->next_pos_, ed_->next_best_path_))
+            return SEARCH_EXTREME;
+        }
+
+        // Include lower confidence objects in extreme search
+        sdf_map_->object_map2d_->getTopConfidenceObjectCloud(object_clouds, false, true);
+        for (auto object_cloud : object_clouds) {
+          if (!object_cloud->points.empty() &&
+              searchObjectPathExtreme(pos, object_cloud, ed_->next_pos_, ed_->next_best_path_))
+            return SEARCH_EXTREME;
+        }
+
+        // Try cached over-depth objects as final option
+        static auto last_over_depth_object_cloud = object_map2d_->over_depth_object_cloud_;
+        if (!object_map2d_->over_depth_object_cloud_->points.empty())
+          last_over_depth_object_cloud = object_map2d_->over_depth_object_cloud_;
+
+        if (!last_over_depth_object_cloud->points.empty() &&
+            searchObjectPathExtreme(
+                pos, last_over_depth_object_cloud, ed_->next_pos_, ed_->next_best_path_)) {
           return SEARCH_EXTREME;
-      }
-
-      // Include lower confidence objects in extreme search
-      sdf_map_->object_map2d_->getTopConfidenceObjectCloud(object_clouds, false, true);
-      for (auto object_cloud : object_clouds) {
-        if (!object_cloud->points.empty() &&
-            searchObjectPathExtreme(pos, object_cloud, ed_->next_pos_, ed_->next_best_path_))
-          return SEARCH_EXTREME;
-      }
-
-      // Try cached over-depth objects as final option
-      static auto last_over_depth_object_cloud = object_map2d_->over_depth_object_cloud_;
-      if (!object_map2d_->over_depth_object_cloud_->points.empty())
-        last_over_depth_object_cloud = object_map2d_->over_depth_object_cloud_;
-
-      if (!last_over_depth_object_cloud->points.empty() &&
-          searchObjectPathExtreme(
-              pos, last_over_depth_object_cloud, ed_->next_pos_, ed_->next_best_path_)) {
-        return SEARCH_EXTREME;
+        }
       }
     }
 
@@ -173,6 +199,28 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   ROS_ERROR_COND(total_time > 0.25, "[Plan NBV] Total time %.2lf s too long!!!", total_time);
 
   return EXPLORATION;
+}
+
+void ExplorationManager::setSkipObjectNavigationOnce(bool skip)
+{
+  skip_object_navigation_once_ = skip;
+}
+
+void ExplorationManager::setCloseObjectApproachOnce(bool close)
+{
+  close_object_approach_once_ = close;
+}
+
+bool ExplorationManager::searchFrontierPath(const Vector2d& start, const Vector2d& end,
+    Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path)
+{
+  path_finder_->reset();
+  if (path_finder_->astarSearch(start, end, 0.25, 0.01) == Astar2D::REACH_END) {
+    refined_pos = end;
+    refined_path = path_finder_->getPath();
+    return true;
+  }
+  return false;
 }
 
 void ExplorationManager::chooseExplorationPolicy(Vector2d cur_pos, vector<Vector2d> frontiers,
@@ -539,7 +587,8 @@ bool ExplorationManager::trySearchObjectPathWithDistance(const Vector2d& start2d
 
 bool ExplorationManager::searchObjectPath(const Vector3d& start,
     const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
-    Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path)
+    Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path,
+    bool close_approach)
 {
   const double max_search_time = 0.2;  // Maximum planning time per attempt
   Vector2d start2d = Vector2d(start(0), start(1));
@@ -550,9 +599,18 @@ bool ExplorationManager::searchObjectPath(const Vector3d& start,
     return false;  // Error indicator from findNearestObjectPoint
 
   // Try different safety distances in order of preference
-  const std::vector<double> distances = { 0.5, 0.70, 0.85 };
-  const std::vector<std::string> debug_messages = { "I'm going to the object! dist = 0.5m!",
-    "I'm going to the object! dist = 0.70m!", "I'm going to the object! dist = 0.85m!" };
+  const std::vector<double> distances = close_approach ?
+      std::vector<double>{ 0.25, 0.35, 0.5, 0.70, 0.85 } :
+      std::vector<double>{ 0.5, 0.70, 0.85 };
+  const std::vector<std::string> debug_messages = close_approach ?
+      std::vector<std::string>{ "I'm going closer to the object! dist = 0.25m!",
+        "I'm going closer to the object! dist = 0.35m!",
+        "I'm going to the object! dist = 0.5m!",
+        "I'm going to the object! dist = 0.70m!",
+        "I'm going to the object! dist = 0.85m!" } :
+      std::vector<std::string>{ "I'm going to the object! dist = 0.5m!",
+        "I'm going to the object! dist = 0.70m!",
+        "I'm going to the object! dist = 0.85m!" };
 
   // Attempt path planning with each safety distance
   for (size_t i = 0; i < distances.size(); ++i) {
@@ -669,7 +727,11 @@ bool ExplorationManager::planTrajectory(
 
   // Kinodynamic A* search
   kinoastar_->reset();
-  kinoastar_->search(goal_state, current_state, control);
+  const int search_result = kinoastar_->search(goal_state, current_state, control);
+  if (search_result != KinoAstar::REACH_END) {
+    ROS_WARN("[ExplorationManager] KinoAstar failed to reach goal, result=%d", search_result);
+    return false;
+  }
   kinoastar_->getKinoNode();
   
   if (kinoastar_->has_path_) {

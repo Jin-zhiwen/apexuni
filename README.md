@@ -192,6 +192,7 @@ ln -s hm3d hm3d_v0.2 # Create a symbolic link for hm3d_v0.2
 # Create necessary directory structure
 mkdir -p data/datasets/objectnav/hm3d
 mkdir -p data/datasets/objectnav/mp3d
+mkdir -p data/datasets/instance_imagenav/hm3d/v3
 
 # HM3D-v0.1
 wget -O data/datasets/objectnav/hm3d/v1.zip https://dl.fbaipublicfiles.com/habitat/data/datasets/objectnav/hm3d/v1/objectnav_hm3d_v1.zip
@@ -204,6 +205,11 @@ unzip data/datasets/objectnav/hm3d/v2.zip -d data/datasets/objectnav/hm3d && mv 
 # MP3D
 wget -O data/datasets/objectnav/mp3d/v1.zip https://dl.fbaipublicfiles.com/habitat/data/datasets/objectnav/m3d/v1/objectnav_mp3d_v1.zip
 unzip data/datasets/objectnav/mp3d/v1.zip -d data/datasets/objectnav/mp3d/v1 && rm data/datasets/objectnav/mp3d/v1.zip
+
+# HM3D InstanceImageNav-v3 (for insinav entry)
+# Put the extracted files to:
+# data/datasets/instance_imagenav/hm3d/v3/val/val.json.gz
+# data/datasets/instance_imagenav/hm3d/v3/val/content/*.json.gz
 ```
 
 <details>
@@ -276,6 +282,7 @@ source ./devel/setup.bash
 python habitat_evaluation.py --dataset hm3dv1
 python habitat_evaluation.py --dataset hm3dv2 # default
 python habitat_evaluation.py --dataset mp3d
+python habitat_evaluation.py --dataset insinav # InstanceImageNav(HM3D-v3), uses CLIP image-image score
 
 # You can also evaluate on one specific episode.
 python habitat_evaluation.py --dataset hm3dv2 test_epi_num=10 # episode_id 10

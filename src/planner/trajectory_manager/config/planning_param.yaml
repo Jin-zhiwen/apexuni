@@ -1,18 +1,26 @@
 ######################## car model ########################
 # Physical parameters
-max_vel: 0.5
-max_acc: 2.0
+max_vel: 0.60
+max_acc: 1.2
 max_domega: 1.0
-zoom_omega: 0.25
-max_cur: 10.0
+zoom_omega: 0.30
+max_cur: 6.0
 
-# Wheelbase
+# Virtual wheelbase used by the car-like kinodynamic model. Keep this compact for
+# Go2 indoor exploration so the planner can still generate tight turns.
 wheel_base: 0.14
 
-# Vehicle dimensions
-length: 0.16
+# Collision proxy for Unitree Go2. Keep the body envelope compact for indoor
+# exploration; this matches the earlier real-world tuning that allowed the robot
+# to move through narrow passages.
+length: 0.40
 width: 0.16
-height: 0.20
+height: 0.40
+
+# Offset the collision box slightly backward from the odom/body origin so goals
+# near walls are not rejected by the front edge too aggressively.
+odom_to_center_x: -0.10
+odom_to_center_y: 0.0
 
 ######################## kinoastar ########################
 # A* oneshot curvature
@@ -20,6 +28,9 @@ astar_cur: 10
 
 # Forward search displacement
 step_arc: 0.2
+
+# Yaw discretization interval for KinoAstar node hashing (rad)
+yaw_resolution: 0.317460317
 
 # Greedy search coefficient
 lambda_heu: 1.0
@@ -42,8 +53,8 @@ oneshot_range: 0.8
 # Sampling time passed to backend
 sampletime: 0.1
 
-# Collision check sampling interval; recommend half of grid_interval
-collision_interval: 0.1
+# Collision check sampling interval; match map resolution to avoid missing thin obstacles.
+collision_interval: 0.05
 
 ######################## global planning ########################
 time_weight: 15.0
@@ -60,5 +71,6 @@ sparseResolution: 8
 # Backend sampling time
 timeResolution: 1
 
-# Safety distance
-safe_dist: 0.20
+# Safety distance for trajectory optimization. The ESDF already includes
+# obstacles_inflation, and hard collision is still enforced by footprint checks.
+safe_dist: 0.05

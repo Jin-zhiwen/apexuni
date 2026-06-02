@@ -5,6 +5,20 @@ using namespace std;
 using namespace Eigen;
 
 namespace apexnav_planner {
+namespace {
+
+double computeWallPenalty(double obstacle_distance, double preferred_clearance, double penalty_weight)
+{
+  if (obstacle_distance >= preferred_clearance) {
+    return 0.0;
+  }
+
+  const double clearance_deficit = preferred_clearance - obstacle_distance;
+  return penalty_weight * clearance_deficit * clearance_deficit;
+}
+
+}  // namespace
+
 Astar2D::~Astar2D()
 {
   for (int i = 0; i < allocate_num_; i++) delete path_node_pool_[i];
@@ -14,6 +28,8 @@ void Astar2D::init(ros::NodeHandle& nh, const SDFMap2D::Ptr& sdf_map)
 {
   nh.param("astar/resolution_astar", resolution_, -1.0);
   nh.param("astar/lambda_heu", lambda_heu_, -1.0);
+  nh.param("astar/preferred_clearance", preferred_clearance_, 0.25);
+  nh.param("astar/wall_penalty_weight", wall_penalty_weight_, 3.0);
   allocate_num_ = 1000000;
 
   this->sdf_map_ = sdf_map;
@@ -130,7 +146,7 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
         continue;
 
       Node2DPtr neighbor;
-      double tmp_g_score = step.norm() + cur_node->g_score;
+      double tmp_g_score = computeTraversalCost(cur_pos, nbr_pos) + cur_node->g_score;
       auto node_iter = open_set_map_.find(nbr_idx);
       if (node_iter == open_set_map_.end()) {
         neighbor = path_node_pool_[use_node_num_];
@@ -209,6 +225,16 @@ double Astar2D::getEuclHeu(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2)
   double tie_breaker = 1.0 + 1e-6 * (dx + dy);
   // Euclidean distance heuristic for 2D
   return tie_breaker * (x2 - x1).norm();
+}
+
+double Astar2D::computeTraversalCost(const Eigen::Vector2d& from, const Eigen::Vector2d& to)
+{
+  const double base_cost = (to - from).norm();
+  Eigen::Vector2d grad;
+  const double obstacle_distance = sdf_map_->getDistWithGrad(to, grad);
+  const double wall_penalty = computeWallPenalty(
+      obstacle_distance, preferred_clearance_, wall_penalty_weight_);
+  return base_cost + wall_penalty;
 }
 
 void Astar2D::backtrack(const Node2DPtr& end_node, const Eigen::Vector2d& end)

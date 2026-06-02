@@ -93,8 +93,8 @@ def extract_object_cloud(
     final_mask = object_mask * 255
     final_mask = cv2.erode(final_mask, None, iterations=erosion_size)  # type: ignore
     valid_depth = depth.copy()
-    # valid_depth[valid_depth == 0] = 1  # set all holes (0) to just be far (1)
-    valid_depth = valid_depth * (max_depth - min_depth) + min_depth
+    valid_depth = np.nan_to_num(valid_depth, nan=0.0, posinf=0.0, neginf=0.0)
+    valid_depth = np.clip(valid_depth, min_depth, max_depth)
     valid_depth_img = valid_depth[:, :, 0]
 
     cloud = get_point_cloud(valid_depth_img, final_mask, fx, fy)

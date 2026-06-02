@@ -74,7 +74,7 @@ public:
           }
 
           // publish rotation command
-          twist_msg.angular.z = M_PI / 6;  // rotation speed
+          twist_msg.angular.z = M_PI / 3;  // rotation speed
           vel_cmd_pub_.publish(twist_msg);
 
           // accumulate yaw change using shortest-angle difference
@@ -255,6 +255,10 @@ public:
       twist_msg.angular.y = 0.0;
       twist_msg.angular.z = cmd(1);
       vel_cmd_pub_.publish(twist_msg);
+      const double track_err =
+          Eigen::Vector2d(odom_pos_(0) - pos(0), odom_pos_(1) - pos(1)).norm();
+      ROS_INFO_THROTTLE(1.0, "[traj_server] cmd_vel vx=%.2f wz=%.2f track_err=%.2f",
+          twist_msg.linear.x, twist_msg.angular.z, track_err);
 
       // Publish current desired pose
       geometry_msgs::Pose desire_pose;
@@ -308,6 +312,10 @@ public:
       twist_msg.angular.y = 0.0;
       twist_msg.angular.z = cmd(1);
       vel_cmd_pub_.publish(twist_msg);
+      const double track_err =
+          Eigen::Vector2d(odom_pos_(0) - pos(0), odom_pos_(1) - pos(1)).norm();
+      ROS_INFO_THROTTLE(1.0, "[traj_server] cmd_vel vx=%.2f wz=%.2f track_err=%.2f",
+          twist_msg.linear.x, twist_msg.angular.z, track_err);
 
       // Publish current desired pose
       geometry_msgs::Pose desire_pose;
@@ -389,7 +397,7 @@ public:
     const double robot_radius = 0.18;
 
     visualization_msgs::Marker marker;
-    marker.header.frame_id = "world";  // Set reference frame
+    marker.header.frame_id = "odom";  // Set reference frame
     marker.header.stamp = ros::Time::now();
     marker.ns = "robot_position";
     marker.id = 0;
@@ -419,7 +427,7 @@ public:
 
     // Create and publish arrow (direction)
     visualization_msgs::Marker arrow_marker;
-    arrow_marker.header.frame_id = "world";
+    arrow_marker.header.frame_id = "odom";
     arrow_marker.header.stamp = ros::Time::now();
     arrow_marker.ns = "robot_direction";
     arrow_marker.id = 1;
@@ -455,7 +463,7 @@ public:
       vector<Eigen::Vector3d> path, double resolution, Eigen::Vector4d color, int id)
   {
     visualization_msgs::Marker mk;
-    mk.header.frame_id = "world";
+    mk.header.frame_id = "odom";
     mk.header.stamp = ros::Time::now();
     mk.type = visualization_msgs::Marker::SPHERE_LIST;
     mk.action = visualization_msgs::Marker::DELETE;

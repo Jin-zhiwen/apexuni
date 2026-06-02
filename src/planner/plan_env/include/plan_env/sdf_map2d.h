@@ -46,8 +46,9 @@ public:
 
   // Core map management functions
   void initMap(ros::NodeHandle& nh);
-  void inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& points,
-      const Eigen::Vector3d& camera_pos, vector<Eigen::Vector2i>& free_grids);
+  void inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
+      const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
+      vector<Eigen::Vector2i>& free_grids);
   void inputObjectCloud2D(
       const vector<DetectedObject>& detected_objects, vector<int>& object_cluster_ids);
   void inputVirtualGround(const pcl::PointCloud<pcl::PointXY>::Ptr& points);
@@ -79,6 +80,7 @@ public:
   void getMapBoundary(Eigen::Vector2d& bmin, Eigen::Vector2d& bmax);
   void getLocalUpdatedBox(Eigen::Vector2d& bmin, Eigen::Vector2d& bmax);
   double getResolution();
+  double getObstaclesInflation();
   int getVoxelNum();
   void setForceOccGrid(const Eigen::Vector2d& pos);
 
@@ -124,6 +126,7 @@ struct MapParam2D {
   double prob_hit_log_, prob_miss_log_, clamp_min_log_, clamp_max_log_,
       min_occupancy_log_;  ///< Log-odds probability parameters
   double max_ray_length_;  ///< Maximum ray length for raycasting
+  int ray_stop_dilation_;  ///< Dilate current-frame obstacle mask when stopping rays
   double local_bound_;     ///< Local mapping boundary limit
   double unknown_flag_;    ///< Flag value for unknown regions
   int buffer_size_;        ///< Size of map data buffers
@@ -293,6 +296,11 @@ inline void SDFMap2D::inflatePoint(
 inline double SDFMap2D::getResolution()
 {
   return mp_->resolution_;
+}
+
+inline double SDFMap2D::getObstaclesInflation()
+{
+  return mp_->obstacles_inflation_;
 }
 
 /// Get total number of voxels in the map

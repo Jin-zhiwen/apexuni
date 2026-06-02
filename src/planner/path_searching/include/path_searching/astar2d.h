@@ -55,6 +55,8 @@ public:
   double getEarlyTerminateCost();
 
   double lambda_heu_;
+  double preferred_clearance_;
+  double wall_penalty_weight_;
 
 private:
   void backtrack(const Node2DPtr& end_node, const Eigen::Vector2d& end);
@@ -62,6 +64,7 @@ private:
   double getDiagHeu(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2);
   double getManhHeu(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2);
   double getEuclHeu(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2);
+  double computeTraversalCost(const Eigen::Vector2d& from, const Eigen::Vector2d& to);
   bool checkPointSafety(const Eigen::Vector2d& pos, int safety_mode);
 
   // main data structure

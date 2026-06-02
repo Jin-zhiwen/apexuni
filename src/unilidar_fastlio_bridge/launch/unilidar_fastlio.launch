@@ -1,0 +1,30 @@
+<launch>
+  <arg name="rviz" default="false" />
+  <arg name="initialize_type" default="2" />
+  <arg name="serial_port" default="/dev/ttyACM0" />
+  <arg name="lidar_ip" default="192.168.1.62" />
+  <arg name="pc_ip" default="192.168.1.2" />
+  <arg name="odom_topic" default="/odom" />
+  <arg name="odom_child_frame" default="base_link" />
+
+  <node pkg="unitree_lidar_ros" type="unitree_lidar_ros_node" name="unitree_lidar_ros_node"
+        respawn="true" output="screen">
+    <rosparam command="load" file="$(find unilidar_fastlio_bridge)/config/unitree_lidar_l2.yaml"/>
+    <param name="/unitree_lidar_ros_node/initialize_type" value="$(arg initialize_type)" />
+    <param name="/unitree_lidar_ros_node/serial_port" value="$(arg serial_port)" />
+    <param name="/unitree_lidar_ros_node/lidar_ip" value="$(arg lidar_ip)" />
+    <param name="/unitree_lidar_ros_node/pc_ip" value="$(arg pc_ip)" />
+  </node>
+
+  <include file="$(find fast_lio)/launch/mapping_unilidar_l2.launch">
+    <arg name="rviz" value="$(arg rviz)" />
+  </include>
+
+  <node pkg="unilidar_fastlio_bridge" type="republish_fastlio_odom.py"
+        name="fastlio_odom_republisher" output="screen">
+    <param name="input_topic" value="/Odometry" />
+    <param name="output_topic" value="$(arg odom_topic)" />
+    <param name="frame_id" value="odom" />
+    <param name="child_frame_id" value="$(arg odom_child_frame)" />
+  </node>
+</launch>

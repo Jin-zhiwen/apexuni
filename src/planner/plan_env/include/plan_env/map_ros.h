@@ -85,6 +85,9 @@ private:
   // Data processing functions
   void processDepthImage();     ///< Process raw depth image into 3D point cloud
   void filterPointCloudToXY();  ///< Filter 3D points to 2D occupancy grid representation
+  double heightFilterOriginZ() const;
+  void processDepthFrame(const sensor_msgs::ImageConstPtr& img,
+      const nav_msgs::OdometryConstPtr& pose, double pose_depth_dt);
   void getObservationObjectsCloud(
       const std::vector<int>& filter_object_ids);  ///< Extract undetected objects from depth data
 
@@ -126,8 +129,15 @@ private:
   // Depth filtering parameters
   double depth_filter_maxdist_, depth_filter_mindist_;  ///< Valid depth range for filtering
   double filter_min_height_, filter_max_height_;        ///< Height range for obstacle detection
+  double object_process_min_pitch_;                     ///< Min camera pitch for object cloud processing
   int depth_filter_margin_;        ///< Margin pixels to ignore near image borders
-  double k_depth_scaling_factor_;  ///< Depth value scaling factor for different sensors
+  double k_depth_scaling_factor_;  ///< Depth value scaling factor for normalized depth
+  bool depth_is_normalized_;       ///< Whether input depth is normalized [0,1]
+  double depth_unit_scale_;        ///< Scale to convert raw depth units to meters
+  double sync_slop_;               ///< Max timestamp gap between depth and pose
+  double max_pose_depth_dt_;       ///< Drop depth frames whose matched pose is too old/new
+  double camera_height_;           ///< Camera height above the local floor
+  bool use_camera_height_filter_;  ///< Interpret filter heights relative to the current camera height
   int skip_pixel_;                 ///< Pixel skip factor for processing efficiency
   std::string frame_id_;           ///< Reference frame ID for published data
   double virtual_ground_height_;   ///< Virtual ground plane offset for navigation
@@ -136,13 +146,14 @@ private:
   bool local_updated_, esdf_need_update_;
 
   // Current sensor data
-  Eigen::Vector3d camera_pos_;                ///< Current camera position in world frame
-  Eigen::Quaterniond camera_q_;               ///< Current camera orientation quaternion
+  Eigen::Vector3d camera_pos_;                ///< camera_depth_optical_frame position in world/odom frame
+  Eigen::Quaterniond camera_q_;               ///< camera_depth_optical_frame orientation quaternion (world/odom frame)
   unique_ptr<cv::Mat> depth_image_;           ///< Current depth image data
   vector<Eigen::Vector3d> proj_points_;       ///< Projected 3D points from depth image
   int proj_points_cnt_;                       ///< Count of valid projected points
   PointCloud3D::Ptr depth_cloud_;             ///< Raw 3D point cloud from depth sensor
   PointCloud2D::Ptr filtered_depth_cloud2d_;  ///< Filtered 2D point cloud for occupancy mapping
+  PointCloud2D::Ptr raycast_depth_cloud2d_;   ///< 2D endpoints used to clear observed free space
 
   // Object detection and ITM integration
   int continue_over_depth_count_;  ///< Counter for maintaining over-depth object consistency

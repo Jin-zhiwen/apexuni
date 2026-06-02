@@ -74,6 +74,8 @@ public:
   void initialize(ros::NodeHandle& nh);
 
   int planNextBestPoint(const Vector3d& pos, const double& yaw);
+  void setSkipObjectNavigationOnce(bool skip = true);
+  void setCloseObjectApproachOnce(bool close = true);
   bool planTrajectory(const Eigen::VectorXd& start, const Eigen::VectorXd& end, const Vector3d& ctrl);
   void getSortedSemanticFrontiers(const Vector2d& cur_pos, const vector<Vector2d>& frontiers,
       vector<SemanticFrontier>& sem_frontiers);
@@ -107,7 +109,8 @@ private:
   // Path Search Utils
   bool searchObjectPath(const Vector3d& start,
       const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
-      Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path);
+      Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path,
+      bool close_approach = false);
   bool searchObjectPathExtreme(const Vector3d& start,
       const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
       Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path);
@@ -132,19 +135,9 @@ private:
 
   ros::ServiceClient tsp_client_;         ///< ROS service client for TSP solver
   unique_ptr<RayCaster2D> ray_caster2d_;  ///< Ray casting for collision checking
+  bool skip_object_navigation_once_ = false;
+  bool close_object_approach_once_ = false;
 };
-
-inline bool ExplorationManager::searchFrontierPath(const Vector2d& start, const Vector2d& end,
-    Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path)
-{
-  path_finder_->reset();
-  if (path_finder_->astarSearch(start, end, 0.25, 0.01) == Astar2D::REACH_END) {
-    refined_pos = end;
-    refined_path = path_finder_->getPath();
-    return true;
-  }
-  return false;
-}
 
 inline bool ExplorationManager::searchObjectPathExtreme(const Vector3d& start,
     const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,

@@ -41,6 +41,13 @@ source ./devel/setup.bash && python habitat_vel_control.py
 source ./devel/setup.bash && python ./real_world_test_example/real_world_test_habitat.py
 ```
 
+### Run the INSiNav real-world bridge
+```bash
+source ./devel/setup.bash && python ./real_world_test_example/real_world_test_insinav.py goal.image_path:=/path/to/your_goal_image.png
+```
+
+If you prefer to stream the goal image from a ROS topic, leave `goal.image_path` empty and set `goal.goal_image_topic` in `real_world_test_example/config/real_world_test_insinav.yaml`.
+
 
 ### Visualization with RViz
 

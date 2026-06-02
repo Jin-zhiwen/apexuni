@@ -10,6 +10,7 @@
  */
 
 #include <plan_env/map_ros.h>
+#include <cmath>
 
 namespace apexnav_planner {
 
@@ -32,7 +33,14 @@ void MapROS::init()
   node_.param("map_ros/depth_filter_margin", depth_filter_margin_, -1);
   node_.param("map_ros/filter_min_height", filter_min_height_, 0.5);
   node_.param("map_ros/filter_max_height", filter_max_height_, 0.88);
+  node_.param("map_ros/object_process_min_pitch", object_process_min_pitch_, 1.5);
   node_.param("map_ros/k_depth_scaling_factor", k_depth_scaling_factor_, -1.0);
+  node_.param("map_ros/depth_is_normalized", depth_is_normalized_, true);
+  node_.param("map_ros/depth_unit_scale", depth_unit_scale_, 1.0);
+  node_.param("map_ros/sync_slop", sync_slop_, 0.05);
+  node_.param("map_ros/max_pose_depth_dt", max_pose_depth_dt_, sync_slop_);
+  node_.param("map_ros/camera_height", camera_height_, 0.43);
+  node_.param("map_ros/use_camera_height_filter", use_camera_height_filter_, false);
   node_.param("map_ros/skip_pixel", skip_pixel_, -1);
   node_.param("map_ros/frame_id", frame_id_, string("world"));
   node_.param("map_ros/virtual_ground_height", virtual_ground_height_, -0.28);
@@ -59,6 +67,7 @@ void MapROS::init()
   // Initialize point cloud data structures
   depth_cloud_.reset(new PointCloud3D());
   filtered_depth_cloud2d_.reset(new PointCloud2D());
+  raycast_depth_cloud2d_.reset(new PointCloud2D());
 
   // Pre-allocate point cloud vectors for efficiency
   proj_points_.resize(640 * 480 / (skip_pixel_ * skip_pixel_));
@@ -102,13 +111,12 @@ void MapROS::init()
   itm_score_sub_ = node_.subscribe("/blip2/cosine_score", 10, &MapROS::itmScoreCallback, this);
 
   // Setup synchronized subscribers for depth image and pose data
-  depth_sub_.reset(
-      new message_filters::Subscriber<sensor_msgs::Image>(node_, "/map_ros/depth", 20));
+  depth_sub_.reset(new message_filters::Subscriber<sensor_msgs::Image>(node_, "/map_ros/depth", 20));
   pose_sub_.reset(new message_filters::Subscriber<nav_msgs::Odometry>(node_, "/map_ros/pose", 20));
 
   sync_image_pose_.reset(new message_filters::Synchronizer<MapROS::SyncPolicyImagePose>(
       MapROS::SyncPolicyImagePose(20), *depth_sub_, *pose_sub_));
-  sync_image_pose_->setMaxIntervalDuration(ros::Duration(0.01));  // Set maximum temporal offset
+  sync_image_pose_->setMaxIntervalDuration(ros::Duration(sync_slop_));
   sync_image_pose_->registerCallback(boost::bind(&MapROS::depthPoseCallback, this, _1, _2));
 
   // Initialize object tracking variables
@@ -157,7 +165,7 @@ void MapROS::detectedObjectCloudCallback(const plan_env::MultipleMasksWithConfid
   if (euler[2] < 0)
     euler[2] += M_PI;
   double camera_pitch = euler[2];
-  if (camera_pitch < 1.5)  // Skip if camera not tilted down enough
+  if (camera_pitch < object_process_min_pitch_)  // Skip if camera not tilted down enough
     return;
 
   // Backup previous over-depth object cloud for consistency tracking
@@ -176,6 +184,11 @@ void MapROS::detectedObjectCloudCallback(const plan_env::MultipleMasksWithConfid
     auto cloud = msg->point_clouds[i];
     auto confidence_score = msg->confidence_scores[i];
     auto label = msg->label_indices[i];
+
+    // Skip detections rejected by the perception gate; otherwise moving robots
+    // accumulate zero-confidence object cells along the trajectory.
+    if (confidence_score <= 1e-6)
+      continue;
 
     // Convert ROS message to PCL point cloud
     PointCloud3D::Ptr single_object_cloud(new PointCloud3D());
@@ -285,7 +298,22 @@ void MapROS::updateESDFCallback(const ros::TimerEvent& /*event*/)
 void MapROS::depthPoseCallback(
     const sensor_msgs::ImageConstPtr& img, const nav_msgs::OdometryConstPtr& pose)
 {
-  // Extract camera pose from odometry message
+  const double pose_depth_dt = std::abs((img->header.stamp - pose->header.stamp).toSec());
+  if (max_pose_depth_dt_ > 0.0 && pose_depth_dt > max_pose_depth_dt_) {
+    ROS_WARN_THROTTLE(1.0,
+        "[MAP_SYNC] Drop depth frame: |depth_stamp - pose_stamp| = %.3f s > %.3f s",
+        pose_depth_dt, max_pose_depth_dt_);
+    return;
+  }
+
+  processDepthFrame(img, pose, pose_depth_dt);
+}
+
+void MapROS::processDepthFrame(const sensor_msgs::ImageConstPtr& img,
+    const nav_msgs::OdometryConstPtr& pose, double pose_depth_dt)
+{
+  // Extract camera_depth_optical_frame pose from odometry message
+  // NOTE: pose must be camera_depth_optical_frame w.r.t. world/odom, NOT base_link!
   camera_pos_(0) = pose->pose.pose.position.x;
   camera_pos_(1) = pose->pose.pose.position.y;
   camera_pos_(2) = pose->pose.pose.position.z;
@@ -302,13 +330,39 @@ void MapROS::depthPoseCallback(
   if (!map_->isInMap(camera_pos))
     return;
 
-  // Convert depth image format (Habitat publishes Float32, some sensors use 8UC1)
+  // Convert depth image to float meters
   cv_bridge::CvImagePtr cv_ptr = cv_bridge::toCvCopy(img, img->encoding);
-  if (img->encoding == sensor_msgs::image_encodings::TYPE_32FC1)
-    (cv_ptr->image).convertTo(cv_ptr->image, CV_16UC1, k_depth_scaling_factor_);
-  if (img->encoding == sensor_msgs::image_encodings::TYPE_8UC1)
-    (cv_ptr->image).convertTo(cv_ptr->image, CV_16UC1, 255.0);
-  cv_ptr->image.copyTo(*depth_image_);
+  cv::Mat depth_float;
+  if (img->encoding == sensor_msgs::image_encodings::TYPE_32FC1) {
+    cv_ptr->image.convertTo(depth_float, CV_32FC1);
+    if (depth_is_normalized_) {
+      depth_float = depth_float * (depth_filter_maxdist_ - depth_filter_mindist_) +
+                    depth_filter_mindist_;
+    } else {
+      depth_float = depth_float * depth_unit_scale_;
+    }
+  } else if (img->encoding == sensor_msgs::image_encodings::TYPE_16UC1) {
+    cv_ptr->image.convertTo(depth_float, CV_32FC1);
+    if (depth_is_normalized_) {
+      depth_float = depth_float / k_depth_scaling_factor_;
+      depth_float = depth_float * (depth_filter_maxdist_ - depth_filter_mindist_) +
+                    depth_filter_mindist_;
+    } else {
+      depth_float = depth_float * depth_unit_scale_;
+    }
+  } else if (img->encoding == sensor_msgs::image_encodings::TYPE_8UC1) {
+    cv_ptr->image.convertTo(depth_float, CV_32FC1);
+    if (depth_is_normalized_) {
+      depth_float = depth_float / 255.0;
+      depth_float = depth_float * (depth_filter_maxdist_ - depth_filter_mindist_) +
+                    depth_filter_mindist_;
+    } else {
+      depth_float = depth_float * depth_unit_scale_;
+    }
+  } else {
+    cv_ptr->image.convertTo(depth_float, CV_32FC1);
+  }
+  depth_float.copyTo(*depth_image_);
 
   auto t1 = ros::Time::now();
 
@@ -316,11 +370,20 @@ void MapROS::depthPoseCallback(
   processDepthImage();
   filterPointCloudToXY();
 
+  const double height_origin_z = heightFilterOriginZ();
+  ROS_INFO_THROTTLE(1.0,
+      "[MAP_DEBUG] depth encoding=%s, proj_points=%d, filtered_2d_points=%zu, "
+      "depth_range=[%.2f, %.2f], pose_depth_dt=%.3f, camera_z=%.3f, "
+      "obstacle_z=[%.3f, %.3f]",
+      img->encoding.c_str(), proj_points_cnt_, filtered_depth_cloud2d_->points.size(),
+      depth_filter_mindist_, depth_filter_maxdist_, pose_depth_dt, camera_pos_(2),
+      height_origin_z + filter_min_height_, height_origin_z + filter_max_height_);
+
   // Update occupancy grid with filtered depth data
   vector<Eigen::Vector2i> free_grids;
-  // Dilate free_grids to ensure more complete coverage
   dilateGrids(free_grids, 1);
-  map_->inputDepthCloud2D(filtered_depth_cloud2d_, camera_pos_, free_grids);
+  map_->inputDepthCloud2D(filtered_depth_cloud2d_, raycast_depth_cloud2d_, camera_pos_, free_grids);
+  ROS_INFO_THROTTLE(1.0, "[MAP_DEBUG] free_grids=%zu", free_grids.size());
   double process_time = (ros::Time::now() - t1).toSec();
   ROS_INFO_THROTTLE(50.0, "[Calculating Time] Grid Map process time = %.3f s", process_time);
 
@@ -343,27 +406,29 @@ void MapROS::processDepthImage()
 {
   proj_points_cnt_ = 0;
 
-  uint16_t* row_ptr;
   int cols = depth_image_->cols;
   int rows = depth_image_->rows;
+  const int max_points = rows * cols;
+  if ((int)depth_cloud_->points.size() < max_points)
+    depth_cloud_->points.resize(max_points);
+
   double depth;
   Eigen::Matrix3d camera_r = camera_q_.toRotationMatrix();
   Eigen::Vector3d pt_cur, pt_world;
-  const double inv_factor = 1.0 / k_depth_scaling_factor_;
-
   // Iterate through depth image pixels with margin and skipping for efficiency
+  // Using standard pinhole camera model in camera_depth_optical_frame:
+  // 3D_camera = [(u-cx)*z/fx, (v-cy)*z/fy, z]
+  // 3D_world = camera_q_.toRotationMatrix() * 3D_camera + camera_pos_
   for (int v = depth_filter_margin_; v < rows - depth_filter_margin_; v += skip_pixel_) {
-    row_ptr = depth_image_->ptr<uint16_t>(v) + depth_filter_margin_;
+    float* row_ptr = depth_image_->ptr<float>(v) + depth_filter_margin_;
     for (int u = depth_filter_margin_; u < cols - depth_filter_margin_; u += skip_pixel_) {
-      // Convert pixel depth value to metric distance
-      depth = (*row_ptr) * inv_factor * (depth_filter_maxdist_ - depth_filter_mindist_) +
-              depth_filter_mindist_;
+      // Depth is already in meters
+      depth = static_cast<double>(*row_ptr);
       row_ptr = row_ptr + skip_pixel_;
 
-      // Apply depth range filtering
-      if (depth > depth_filter_maxdist_)
-        depth = depth_filter_maxdist_;
-      else if (depth < depth_filter_mindist_)
+      // Keep over-range returns as ray endpoints beyond max_ray_length; SDFMap2D
+      // will truncate those rays as free space instead of creating false obstacles.
+      if (!std::isfinite(depth) || depth < depth_filter_mindist_)
         continue;
 
       // Project pixel to 3D camera coordinates
@@ -379,6 +444,7 @@ void MapROS::processDepthImage()
       pt.z = pt_world[2];
     }
   }
+  depth_cloud_->points.resize(proj_points_cnt_);
   publishPointCloud(depth_cloud_pub_, depth_cloud_);
 }
 
@@ -431,14 +497,21 @@ void MapROS::getObservationObjectsCloud(const std::vector<int>& filter_object_id
   map_->object_map2d_->inputObservationObjectsCloud(observation_clouds, max(0.0, itm_score_));
 }
 
+double MapROS::heightFilterOriginZ() const
+{
+  if (!use_camera_height_filter_)
+    return 0.0;
+
+  return camera_pos_(2) - camera_height_;
+}
+
 /**
  * @brief Filter and process 3D point cloud to 2D occupancy grid
  */
 void MapROS::filterPointCloudToXY()
 {
-  // Default ground height assumption (currently set to 0)
-  double cur_floor_height = 0.0;
-  double virtual_ground = virtual_ground_height_;
+  const double cur_floor_height = heightFilterOriginZ();
+  const double virtual_ground = use_camera_height_filter_ ? 0.0 : virtual_ground_height_;
 
   auto t1 = ros::Time::now();
   PointCloud3D::Ptr filtered_cloud_3d(new PointCloud3D());
@@ -453,6 +526,7 @@ void MapROS::filterPointCloudToXY()
   voxel_filter.filter(*down_depth_cloud_3d);
 
   filtered_depth_cloud2d_->clear();
+  raycast_depth_cloud2d_->clear();
 
   // Separate points by height categories
   for (int i = 0; i < (int)down_depth_cloud_3d->points.size(); i++) {
@@ -460,6 +534,11 @@ void MapROS::filterPointCloudToXY()
     pt.x = down_depth_cloud_3d->points[i].x;
     pt.y = down_depth_cloud_3d->points[i].y;
     pt.z = down_depth_cloud_3d->points[i].z;
+
+    Point2D ray_pt_xy;
+    ray_pt_xy.x = pt.x;
+    ray_pt_xy.y = pt.y;
+    raycast_depth_cloud2d_->points.push_back(ray_pt_xy);
 
     // Points below virtual ground (for virtual ground generation)
     if (down_depth_cloud_3d->points[i].z < cur_floor_height + virtual_ground)
@@ -506,7 +585,7 @@ void MapROS::filterPointCloudToXY()
   double camera_pitch = euler[2];
 
   // When camera is pointing down (pitch > 1.5 rad) and under-ground points exist
-  if (camera_pitch > 1.5 && !under_ground_cloud_3d->points.empty()) {
+  if (camera_pitch > object_process_min_pitch_ && !under_ground_cloud_3d->points.empty()) {
     for (auto pt : under_ground_cloud_3d->points) {
       Eigen::Vector3d pt_pos = Eigen::Vector3d(pt.x, pt.y, pt.z);
       Eigen::Vector2d ground_pos;
@@ -516,7 +595,6 @@ void MapROS::filterPointCloudToXY()
         Point2D pt_xy;
         pt_xy.x = ground_pos(0);
         pt_xy.y = ground_pos(1);
-        filtered_depth_cloud2d_->points.push_back(pt_xy);
         under_ground_cloud_2d->points.push_back(pt_xy);
       }
     }

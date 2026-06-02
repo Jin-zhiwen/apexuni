@@ -1,0 +1,15 @@
+<launch>
+  <arg name="initialize_type" default="2" />
+  <arg name="serial_port" default="/dev/ttyACM0" />
+  <arg name="lidar_ip" default="192.168.1.62" />
+  <arg name="pc_ip" default="192.168.1.2" />
+
+  <node pkg="unitree_lidar_ros" type="unitree_lidar_ros_node" name="unitree_lidar_ros_node"
+        respawn="true" output="screen">
+    <rosparam command="load" file="$(find unilidar_fastlio_bridge)/config/unitree_lidar_l2.yaml"/>
+    <param name="/unitree_lidar_ros_node/initialize_type" value="$(arg initialize_type)" />
+    <param name="/unitree_lidar_ros_node/serial_port" value="$(arg serial_port)" />
+    <param name="/unitree_lidar_ros_node/lidar_ip" value="$(arg lidar_ip)" />
+    <param name="/unitree_lidar_ros_node/pc_ip" value="$(arg pc_ip)" />
+  </node>
+</launch>

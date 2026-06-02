@@ -2,6 +2,8 @@
 #include <exploration_manager/exploration_fsm.h>
 #include <exploration_manager/exploration_fsm_traj.h>
 
+#include <memory>
+
 #include <exploration_manager/backward.hpp>
 namespace backward {
 backward::SignalHandling sh;
@@ -22,8 +24,8 @@ int main(int argc, char** argv)
     ROS_INFO("========================================");
     ROS_INFO("  Starting in REAL WORLD mode");
     ROS_INFO("========================================");
-    ExplorationFSMReal expl_fsm;
-    expl_fsm.init(nh);
+    auto expl_fsm = std::make_shared<ExplorationFSMReal>();
+    expl_fsm->init(nh);
     ros::Duration(1.0).sleep();
     ros::spin();
   }

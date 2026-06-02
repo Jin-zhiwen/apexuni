@@ -14,7 +14,12 @@ void KinoAstar::init()
   nh_.param<double>(ros::this_node::getName() + "/oneshot_range", oneshot_range_, 5);
   nh_.param<double>(ros::this_node::getName() + "/sampletime", sampletime_, 0.1);
 
-  inv_yaw_resolution_ = 3.15;
+  nh_.param<double>(ros::this_node::getName() + "/yaw_resolution", yaw_resolution_, 1.0 / 3.15);
+  if (yaw_resolution_ <= 1e-6) {
+    ROS_WARN("KinoAstar: invalid yaw_resolution %.6f, use default %.6f",
+        yaw_resolution_, 1.0 / 3.15);
+    yaw_resolution_ = 1.0 / 3.15;
+  }
   inv_yaw_resolution_ = 1.0 / yaw_resolution_;
   grid_interval_ = map_->getResolution();
   allocate_num_ = 1000000;
@@ -28,18 +33,28 @@ void KinoAstar::init()
 
   nh_.param<double>(ros::this_node::getName() + "/max_vel", max_vel_, 5);
   nh_.param<double>(ros::this_node::getName() + "/max_acc", max_acc_, 5);
-
-  max_acc_ = max_acc_ * 0.6;
-  max_vel_ = max_vel_ * 0.6;
+  if (max_vel_ <= 1e-3) {
+    ROS_WARN("KinoAstar: invalid max_vel %.6f, use 0.35", max_vel_);
+    max_vel_ = 0.35;
+  }
+  if (max_acc_ <= 1e-3) {
+    ROS_WARN("KinoAstar: invalid max_acc %.6f, use 1.0", max_acc_);
+    max_acc_ = 1.0;
+  }
 
   nh_.param<double>(ros::this_node::getName() + "/max_cur", max_cur_, 0.5);
   nh_.param<double>(ros::this_node::getName() + "/non_siguav", non_siguav_, 0.01);
   nh_.param<double>(ros::this_node::getName() + "/collision_interval", collision_interval_, 0.1);
+  nh_.param<bool>(
+      ros::this_node::getName() + "/kinoastar/unknown_as_collision",
+      unknown_as_collision_, true);
   nh_.param<double>(ros::this_node::getName() + "/wheel_base", wheel_base_, 0.8);
   max_steer_ = std::atan(wheel_base_ * max_cur_);
   nh_.param<double>(ros::this_node::getName() + "/length", length_, 1);
   nh_.param<double>(ros::this_node::getName() + "/width", width_, 1);
   nh_.param<double>(ros::this_node::getName() + "/height", height_, 1);
+  nh_.param<double>(ros::this_node::getName() + "/odom_to_center_x", odom_to_center_x_, 0.0);
+  nh_.param<double>(ros::this_node::getName() + "/odom_to_center_y", odom_to_center_y_, 0.0);
 
   // SE(2) motion model (x,y,yaw), suitable for nonholonomic constraints with limited turning radius
   shotptr_s.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.2));
@@ -89,6 +104,17 @@ int KinoAstar::search(
   Eigen::Vector2d end_pos2d = end_state.head(2);
   Eigen::Vector2i start_idx;
   map_->posToIndex(start_pos2d, start_idx);
+  Eigen::VectorXd safe_end_state = end_state;
+  if (std::fabs(start_state[4]) > max_vel_) {
+    ROS_WARN_THROTTLE(1.0, "KinoAstar: clamp start velocity %.3f to max_vel %.3f",
+        start_state[4], max_vel_);
+    start_state[4] = start_state[4] >= 0.0 ? max_vel_ : -max_vel_;
+  }
+  if (std::fabs(safe_end_state[4]) > max_vel_) {
+    ROS_WARN_THROTTLE(1.0, "KinoAstar: clamp end velocity %.3f to max_vel %.3f",
+        safe_end_state[4], max_vel_);
+    safe_end_state[4] = safe_end_state[4] >= 0.0 ? max_vel_ : -max_vel_;
+  }
 
   // Check whether start/end states are in collision
   // isocc = isCollisionPosYaw(start_state.head(2), start_state[2]);
@@ -108,7 +134,7 @@ int KinoAstar::search(
 
   start_state_ = start_state;
   start_ctrl_ = init_ctrl;
-  end_state_ = end_state;
+  end_state_ = safe_end_state;
 
   // Initialize path_node_pool_ with the start node
   PathNodePtr cur_node = path_node_pool_[0];
@@ -119,7 +145,7 @@ int KinoAstar::search(
   cur_node->g_score = 0.0;
   cur_node->input = Eigen::Vector3d(0.0, 0.0, 0.0);
   cur_node->singul = getSingularity(start_state[4]);
-  cur_node->f_score = lambda_heu_ * getHeu(cur_node->state, end_state);
+  cur_node->f_score = lambda_heu_ * getHeu(cur_node->state, end_state_);
   cur_node->node_state = IN_OPEN_SET;
 
   open_set_.push(cur_node);
@@ -127,8 +153,9 @@ int KinoAstar::search(
 
   expanded_nodes_.insert(cur_node->index, yawToIndex(start_state[2]), 0, cur_node);
   PathNodePtr terminate_node = NULL;
-  // If initial velocity is negative, do not consider direction; otherwise consider direction
-  if (cur_node->singul == 0)
+  // A moving start can keep expanding with its current motion mode; a stationary start
+  // needs a dedicated first expansion to choose an initial direction.
+  if (cur_node->singul != 0)
     initsearch = true;
 
   while (!open_set_.empty()) {
@@ -161,8 +188,12 @@ int KinoAstar::search(
         return NO_PATH;
       }
       else {
-        ROS_WARN("KinoSearch: Reach the max seach time");
-        return REACH_END;
+        const double remaining_dist =
+            (terminate_node->state.head(2) - end_state_.head(2)).norm();
+        ROS_WARN(
+            "KinoSearch: Reach the max seach time, partial path remaining_dist=%.2f",
+            remaining_dist);
+        return REACH_HORIZON;
       }
     }
 
@@ -181,11 +212,20 @@ int KinoAstar::search(
     // (initial state may have forward velocity). Obtain inputs.
     // input[0] is steering angle; input[1] is displacement
     if (!initsearch) {
-      if (start_state_[4] > 0) {
-        for (double arc = grid_interval_; arc <= 2 * grid_interval_ + 1e-3; arc += grid_interval_) {
+      std::vector<double> initial_directions;
+      if (std::fabs(start_state_[4]) <= non_siguav_) {
+        // A real robot often has to back away from a wall before it can steer out.
+        initial_directions = { 1.0, -1.0 };
+      }
+      else {
+        initial_directions = { start_state_[4] < 0.0 ? -1.0 : 1.0 };
+      }
+      for (double direction : initial_directions) {
+        for (double arc = grid_interval_; arc <= 2 * grid_interval_ + 1e-3;
+            arc += grid_interval_) {
           for (double steer = -max_steer_; steer <= max_steer_ + 1e-3;
               steer += res * max_steer_ * 1.0) {
-            ctrl_input << steer, arc, 0.0;
+            ctrl_input << steer, direction * arc, 0.0;
             inputs.push_back(ctrl_input);
           }
         }
@@ -193,7 +233,7 @@ int KinoAstar::search(
       initsearch = true;
     }
     else {
-      for (double arc = 0; arc <= step_arc_ + 1e-3; arc += 0.5 * step_arc_) {
+      for (double arc = 0.5 * step_arc_; arc <= step_arc_ + 1e-3; arc += 0.5 * step_arc_) {
         for (double steer = -max_steer_; steer <= max_steer_ + 1e-3;
             steer += res * max_steer_ * 1.0) {
           ctrl_input << steer, arc, 0.0;
@@ -258,7 +298,7 @@ int KinoAstar::search(
 
       tmp_g_score += std::fabs(input[1]);
       tmp_g_score += cur_node->g_score;
-      tmp_f_score = tmp_g_score + lambda_heu_ * getHeu(pro_state, end_state);
+      tmp_f_score = tmp_g_score + lambda_heu_ * getHeu(pro_state, end_state_);
 
       // New node not expanded before: add it
       if (pro_node == NULL) {
@@ -597,8 +637,8 @@ bool KinoAstar::isCollisionPosYaw(const Eigen::Vector2d& pos, const double& yaw)
   double sin_yaw = sin(yaw);
   Eigen::Matrix2d egoR;
   egoR << cos_yaw, -sin_yaw, sin_yaw, cos_yaw;
-  // Assume the odometry pose is at the vehicle center
-  Eigen::Vector2d center(pos + egoR * Eigen::Vector2d(0.0, 0));
+  // Allow the odometry origin to differ from the geometric center of the robot.
+  Eigen::Vector2d center(pos + egoR * Eigen::Vector2d(odom_to_center_x_, odom_to_center_y_));
 
   // vehicle body
   Eigen::Vector2d corner1 = center + egoR * Eigen::Vector2d(length_ / 2, width_ / 2);
@@ -656,11 +696,9 @@ bool KinoAstar::isCollisionPosYaw(const Eigen::Vector2d& pos, const double& yaw)
 bool KinoAstar::checkCollision(double x, double y, double z)
 {
   Eigen::Vector2d pos(x, y);
-  if (map_->getOccupancy(pos) == SDFMap2D::OCCUPIED ||
-      map_->getOccupancy(pos) == SDFMap2D::UNKNOWN) {
-    return true;
-  }
-  return false;
+  const int occupancy = map_->getOccupancy(pos);
+  return occupancy == SDFMap2D::OCCUPIED ||
+      (unknown_as_collision_ && occupancy == SDFMap2D::UNKNOWN);
 }
 
 double KinoAstar::getHeu(const Eigen::VectorXd& x1, const Eigen::VectorXd& x2)

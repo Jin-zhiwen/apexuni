@@ -117,6 +117,8 @@ public:
   double width_;
   double height_;
   double wheel_base_;
+  double odom_to_center_x_;
+  double odom_to_center_y_;
   SDFMap2D::Ptr map_;
   // Terminal path
   std::vector<PathNodePtr> path_nodes_;
@@ -182,6 +184,7 @@ private:
   double yaw_origin_;          // used to convert yaw to index
   double non_siguav_;          // minimum speed considered non-zero
   double collision_interval_;  // collision checking interval
+  bool unknown_as_collision_ = true;
 
   // Commented parameters exist in the original but are unused here
   double max_vel_;

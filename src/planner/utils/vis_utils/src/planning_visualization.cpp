@@ -374,10 +374,7 @@ void PlanningVisualization::drawFrontier(const vector<vector<Eigen::Vector3d>>& 
 Eigen::Vector4d PlanningVisualization::getColor(const double& h, double alpha)
 {
   double h1 = h;
-  if (h1 < 0.0 || h1 > 1.0) {
-    std::cout << "h out of range" << std::endl;
-    h1 = 0.0;
-  }
+  h1 = std::min(1.0, std::max(0.0, h1));
 
   double lambda;
   Eigen::Vector4d color1, color2;

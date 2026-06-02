@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>utlidar_ros1_bridge</name>
+  <version>0.0.1</version>
+  <description>Bridge Go2 ROS2 /utlidar odometry into ROS1 nav_msgs/Odometry for ApexNav.</description>
+
+  <maintainer email="jzw@example.com">jzw</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>rospy</build_depend>
+  <build_depend>nav_msgs</build_depend>
+
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+
+  <export/>
+</package>

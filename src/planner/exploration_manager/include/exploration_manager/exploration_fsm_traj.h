@@ -5,6 +5,7 @@
 #include <Eigen/Eigen>
 
 // Standard C++ libraries
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -15,10 +16,12 @@
 // ROS message types
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <geometry_msgs/Twist.h>
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/Float64.h>
 #include <std_msgs/Int32.h>
 #include <std_msgs/Empty.h>
+#include <std_msgs/String.h>
 #include <visualization_msgs/Marker.h>
 #include <trajectory_manager/PolyTraj.h>
 
@@ -50,6 +53,15 @@ constexpr double LOCAL_DISTANCE = 0.80;
 constexpr double FORWARD_DISTANCE = 0.15;
 constexpr double FORCE_DORMANT_DISTANCE = 0.35;
 constexpr double MIN_SAFE_DISTANCE = 0.15;
+constexpr double MANUAL_FALLBACK_REACH_DISTANCE = 0.10;
+constexpr double EXPLORATION_FALLBACK_REACH_DISTANCE = 0.15;
+constexpr double EXPLORATION_FALLBACK_MAX_DIRECT_DISTANCE = 0.50;
+constexpr double MANUAL_FALLBACK_PROGRESS_EPS = 0.03;
+constexpr double MANUAL_FALLBACK_STUCK_TIMEOUT = 4.0;
+constexpr double LIGHTGLUE_UNVERIFIED_REPLAN_WAIT = 4.0;
+constexpr double LIGHTGLUE_VERIFIED_HOLD_TIME = 0.0;
+constexpr double LIGHTGLUE_FINISH_REVOKE_TIME = 0.0;
+constexpr double DEFAULT_TRACKING_ABORT_DISTANCE = 0.65;
 
 // Counters / thresholds
 constexpr int MAX_STUCKING_COUNT = 25;
@@ -65,8 +77,8 @@ constexpr double SAMPLE_NUM = 10.0;
 
 // Visualization / robot marker
 constexpr double VIS_SCALE_FACTOR = 1.8;
-constexpr double ROBOT_HEIGHT = 0.15;
-constexpr double ROBOT_RADIUS = 0.18;
+constexpr double ROBOT_HEIGHT = 0.35;
+constexpr double ROBOT_RADIUS = 0.22;
 }  // namespace FSMConstantsReal
 
 class FastPlannerManager;
@@ -121,6 +133,7 @@ private:
   ros::Timer exec_timer_, frontier_timer_, safety_timer_;
   ros::Subscriber trigger_sub_, goal_sub_, odom_sub_, confidence_threshold_sub_;
   ros::Subscriber traj_finish_sub_;  // TODO: Subscribe to trajectory execution status
+  ros::Subscriber insinav_stop_verified_sub_;  // LightGlue stop verification status
   
   ros::Publisher ros_state_pub_, expl_state_pub_, expl_result_pub_;
   ros::Publisher robot_marker_pub_;
@@ -128,6 +141,28 @@ private:
   // Real-world specific: trajectory control publishers
   ros::Publisher poly_traj_pub_;   // Publish polynomial trajectory
   ros::Publisher stop_pub_;        // Emergency stop signal
+  ros::Publisher manual_cmd_pub_;  // Direct cmd_vel fallback for manual nearby goals
+  bool visualize_object_markers_ = false;
+
+  /* Manual goal fallback */
+  bool manual_goal_active_ = false;
+  Eigen::Vector2d manual_goal_pos_ = Eigen::Vector2d::Zero();
+  Eigen::Vector2d manual_goal_dormant_pos_ = Eigen::Vector2d::Zero();
+  double manual_goal_yaw_ = 0.0;
+  bool manual_goal_replan_after_finish_ = false;
+  double manual_goal_best_dist_ = std::numeric_limits<double>::infinity();
+  ros::Time manual_goal_last_progress_time_;
+  double manual_goal_turn_dir_ = 1.0;
+
+  /* LightGlue Stop Gate Verification */
+  std::string insinav_stop_verified_status_;  // Track LightGlue verification status
+  ros::Time finish_wait_start_time_;
+  ros::Time lightglue_verified_start_time_;
+  ros::Time finish_completed_time_;
+  Eigen::Vector2d finish_goal_pos_ = Eigen::Vector2d::Zero();
+  bool finish_goal_pos_valid_ = false;
+  bool lightglue_close_stop_candidate_active_ = false;
+  double tracking_abort_distance_ = FSMConstantsReal::DEFAULT_TRACKING_ABORT_DISTANCE;
   
   /* Trajectory execution status */
   // Trajectory state is tracked in fd_->static_state_
@@ -135,7 +170,7 @@ private:
   /* Exploration Planner */
   TrajPlannerResult callTrajectoryPlanner();
   void polyTraj2ROSMsg(const LocalTrajectory& local_traj, trajectory_manager::PolyTraj& poly_msg);
-  void selectLocalTarget(const Eigen::Vector2d& current_pos, const std::vector<Eigen::Vector2d>& path,
+  bool selectLocalTarget(const Eigen::Vector2d& current_pos, const std::vector<Eigen::Vector2d>& path,
       const double& local_distance, Eigen::Vector2d& target_pos, double& target_yaw);
   
   // Safety and stuck detection
@@ -143,6 +178,11 @@ private:
   bool checkNeedReplan();
   bool checkStuckCondition();
   double computePathCost(const std::vector<Eigen::Vector2d>& path);
+  void activateManualFallback(
+      const Eigen::Vector2d& target_pos, double target_yaw, bool replan_after_finish,
+      const Eigen::Vector2d& dormant_pos);
+  double stabilizeFallbackYawError(double yaw_error);
+  void stepManualGoalFallback();
 
   /* Helper functions */
   bool updateFrontierAndObject();
@@ -161,6 +201,7 @@ private:
   void odometryCallback(const nav_msgs::OdometryConstPtr& msg);
   void confidenceThresholdCallback(const std_msgs::Float64ConstPtr& msg);
   void trajectoryFinishCallback(const std_msgs::EmptyConstPtr& msg);  // TODO: Define proper msg type
+  void insinnavStopVerifiedCallback(const std_msgs::StringConstPtr& msg);  // LightGlue verification status
 
 public:
   ExplorationFSMReal() = default;

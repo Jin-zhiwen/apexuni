@@ -40,8 +40,28 @@ add_executable(exploration_node
   src/exploration_node.cpp
   src/exploration_fsm.cpp
   src/exploration_fsm_traj.cpp
+  src/exploration_fsm_traj_logic.cpp
   src/exploration_manager.cpp
 )
 target_link_libraries(exploration_node
   ${catkin_LIBRARIES}
+)
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(exploration_fsm_traj_logic_test
+    test/exploration_fsm_traj_logic_test.cpp
+    src/exploration_fsm_traj_logic.cpp
+  )
+  if(TARGET exploration_fsm_traj_logic_test)
+    target_link_libraries(exploration_fsm_traj_logic_test
+      ${catkin_LIBRARIES}
+      gtest_main
+    )
+  endif()
+endif()
+
+# Install Python scripts
+catkin_install_python(PROGRAMS
+  scripts/camera_pose_tf_converter.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
