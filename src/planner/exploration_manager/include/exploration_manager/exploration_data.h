@@ -38,6 +38,7 @@ struct FSMData {
     last_next_pos_ = Eigen::Vector2d(-100, -100);
     newest_action_ = -1;
     init_action_count_ = 0;
+    no_frontier_count_ = 0;
     stucking_action_count_ = 0;
     stucking_next_pos_count_ = 0;
     traveled_path_.clear();
@@ -68,6 +69,7 @@ struct FSMData {
   Eigen::Vector2d last_next_pos_;
   int newest_action_;
   int init_action_count_;
+  int no_frontier_count_;
   int stucking_action_count_;
   int stucking_next_pos_count_;
 

@@ -14,6 +14,9 @@ class ROSPublisher:
         # Create ROS publishers
         self.depth_pub = rospy.Publisher("/habitat/camera_depth", Image, queue_size=10)
         self.rgb_pub = rospy.Publisher("/habitat/camera_rgb", Image, queue_size=10)
+        self.goal_image_pub = rospy.Publisher(
+            "/habitat/goal_image", Image, queue_size=1, latch=True
+        )
         self.odom_pub = rospy.Publisher("/habitat/odom", Odometry, queue_size=10)
         self.pose_pub = rospy.Publisher("/habitat/sensor_pose", Odometry, queue_size=10)
         # Create cv_bridge object
@@ -30,6 +33,12 @@ class ROSPublisher:
         rgb_msg.header.stamp = ros_time
         rgb_msg.header.frame_id = "world"
         self.rgb_pub.publish(rgb_msg)
+
+    def publish_goal_image(self, goal_image):
+        goal_msg = self.bridge.cv2_to_imgmsg(goal_image, encoding="rgb8")
+        goal_msg.header.stamp = rospy.Time.now()
+        goal_msg.header.frame_id = "world"
+        self.goal_image_pub.publish(goal_msg)
 
     def publish_robot_odom(self, ros_time, gps, compass):
         copy_compass = deepcopy(compass)

@@ -126,6 +126,7 @@ private:
   // Depth filtering parameters
   double depth_filter_maxdist_, depth_filter_mindist_;  ///< Valid depth range for filtering
   double filter_min_height_, filter_max_height_;        ///< Height range for obstacle detection
+  double object_process_min_pitch_;                     ///< Min camera pitch for object cloud processing
   int depth_filter_margin_;        ///< Margin pixels to ignore near image borders
   double k_depth_scaling_factor_;  ///< Depth value scaling factor for different sensors
   int skip_pixel_;                 ///< Pixel skip factor for processing efficiency

@@ -31,6 +31,8 @@ dependencies = [
     "modelscope==1.16.1",
     "accelerate==0.32.1",
     "openai>=1.58.1",
+    "clip @ git+https://github.com/openai/CLIP.git",
+    "lightglue @ git+https://github.com/cvg/LightGlue.git",
     "habitat2ros @ file:./habitat2ros",
     "ollama",
 ]

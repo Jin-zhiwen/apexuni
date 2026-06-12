@@ -6,6 +6,9 @@
   <!-- Real-world mode flag -->
   <arg name="is_real_world" default="false"/>
 
+  <!-- Parameter yaml loaded into ROS param server for planner/map_ros -->
+  <arg name="eval_config" default="habitat_eval_hm3dv2.yaml"/>
+
   <!-- topic of your odometry such as VIO or LIO -->
   <arg name="odom_topic" value="/habitat/odom" />
   <!-- transform of camera frame in the world frame -->
@@ -13,8 +16,13 @@
   <!-- depth image, 640x480 by default -->
   <arg name="depth_topic" value="/habitat/camera_depth"/>
 
+  <!-- map_ros filter params (task-dependent) -->
+  <arg name="filter_min_height" default="0.28"/>
+  <arg name="filter_max_height" default="1.18"/>
+  <arg name="object_process_min_pitch" default="1.5"/>
+
   <group unless="$(arg is_real_world)">
-    <rosparam file="$(find exploration_manager)/../../../config/habitat_eval_hm3dv2.yaml" command="load" />
+    <rosparam file="$(find exploration_manager)/../../../config/$(arg eval_config)" command="load" />
   </group>
 
   <!-- main algorithm params -->
@@ -28,6 +36,10 @@
     <arg name="odometry_topic_" value="$(arg odom_topic)"/>
     <arg name="sensor_pose_topic_" value="$(arg sensor_pose_topic)"/>
     <arg name="depth_topic_" value="$(arg depth_topic)"/>
+
+    <arg name="filter_min_height_" value="$(arg filter_min_height)"/>
+    <arg name="filter_max_height_" value="$(arg filter_max_height)"/>
+    <arg name="object_process_min_pitch_" value="$(arg object_process_min_pitch)"/>
 
     <!-- intrinsic params of the depth camera -->
     <arg name="cx_" value="320"/>

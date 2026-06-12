@@ -32,6 +32,7 @@ void MapROS::init()
   node_.param("map_ros/depth_filter_margin", depth_filter_margin_, -1);
   node_.param("map_ros/filter_min_height", filter_min_height_, 0.5);
   node_.param("map_ros/filter_max_height", filter_max_height_, 0.88);
+  node_.param("map_ros/object_process_min_pitch", object_process_min_pitch_, 1.5);
   node_.param("map_ros/k_depth_scaling_factor", k_depth_scaling_factor_, -1.0);
   node_.param("map_ros/skip_pixel", skip_pixel_, -1);
   node_.param("map_ros/frame_id", frame_id_, string("world"));
@@ -157,7 +158,7 @@ void MapROS::detectedObjectCloudCallback(const plan_env::MultipleMasksWithConfid
   if (euler[2] < 0)
     euler[2] += M_PI;
   double camera_pitch = euler[2];
-  if (camera_pitch < 1.5)  // Skip if camera not tilted down enough
+  if (camera_pitch < object_process_min_pitch_)  // Skip if camera not tilted down enough
     return;
 
   // Backup previous over-depth object cloud for consistency tracking
@@ -316,11 +317,18 @@ void MapROS::depthPoseCallback(
   processDepthImage();
   filterPointCloudToXY();
 
+  ROS_INFO_THROTTLE(1.0,
+      "[MAP_DEBUG] depth encoding=%s, proj_points=%d, filtered_2d_points=%zu, "
+      "depth_range=[%.2f, %.2f]",
+      img->encoding.c_str(), proj_points_cnt_, filtered_depth_cloud2d_->points.size(),
+      depth_filter_mindist_, depth_filter_maxdist_);
+
   // Update occupancy grid with filtered depth data
   vector<Eigen::Vector2i> free_grids;
   // Dilate free_grids to ensure more complete coverage
   dilateGrids(free_grids, 1);
   map_->inputDepthCloud2D(filtered_depth_cloud2d_, camera_pos_, free_grids);
+  ROS_INFO_THROTTLE(1.0, "[MAP_DEBUG] free_grids=%zu", free_grids.size());
   double process_time = (ros::Time::now() - t1).toSec();
   ROS_INFO_THROTTLE(50.0, "[Calculating Time] Grid Map process time = %.3f s", process_time);
 
@@ -506,7 +514,7 @@ void MapROS::filterPointCloudToXY()
   double camera_pitch = euler[2];
 
   // When camera is pointing down (pitch > 1.5 rad) and under-ground points exist
-  if (camera_pitch > 1.5 && !under_ground_cloud_3d->points.empty()) {
+  if (camera_pitch > object_process_min_pitch_ && !under_ground_cloud_3d->points.empty()) {
     for (auto pt : under_ground_cloud_3d->points) {
       Eigen::Vector3d pt_pos = Eigen::Vector3d(pt.x, pt.y, pt.z);
       Eigen::Vector2d ground_pos;

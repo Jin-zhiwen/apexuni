@@ -37,6 +37,22 @@ def transform_rgb_bgr(image):
     return image[:, :, [2, 1, 0]]
 
 
+def publish_goal_image_if_available(ros_pub, observations, warned_flag):
+    if "instance_imagegoal" in observations:
+        try:
+            ros_pub.publish_goal_image(observations["instance_imagegoal"])
+            return True
+        except Exception as exc:
+            rospy.logwarn("[Habitat] Failed to publish goal image: %s", exc)
+            return warned_flag
+    if not warned_flag:
+        rospy.logwarn(
+            "[Habitat] No instance_imagegoal in observations; /habitat/goal_image will be empty. "
+            "Use InstanceImageNav (HM3D) or provide goal.image_path override."
+        )
+    return warned_flag or False
+
+
 def publish_observations(event):
     global msg_observations, fusion_score
     global ros_pub, confidence_threshold_pub
@@ -145,6 +161,8 @@ def main(cfg: DictConfig) -> None:
     msg_observations = deepcopy(observations)
 
     ros_pub = habitat_publisher.ROSPublisher()
+    warned_no_goal = False
+    warned_no_goal = publish_goal_image_if_available(ros_pub, observations, warned_no_goal)
     cmd_sub = rospy.Subscriber("/cmd_vel", Twist, cmd_vel_callback, queue_size=10)
     timer = rospy.Timer(rospy.Duration(0.1), publish_observations)
     itm_score_pub = rospy.Publisher("/blip2/cosine_score", Float64, queue_size=10)
@@ -204,6 +222,7 @@ def main(cfg: DictConfig) -> None:
         rospy.loginfo_throttle(5.0, f"I'm finding {label}")
 
         observations = env.step(HabitatSimActions.move_forward)
+        warned_no_goal = publish_goal_image_if_available(ros_pub, observations, warned_no_goal)
 
         habitat_env_time = rospy.Time.now() - loop_begin_time
 

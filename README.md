@@ -2,7 +2,7 @@
     <img src="assets/apexnav_logo_white.png" alt="ApexNav Logo" width="200">
     <h2>An Adaptive Exploration Strategy for Zero-Shot Object Navigation with Target-centric Semantic Fusion</h2>
     <strong>
-      <em>IEEE Robotics and Automation Letters && IEEE ICRA 2026</em>
+      <em>IEEE Robotics and Automation Letters</em>
     </strong>
     <br>
         <a href="https://zager-zhang.github.io" target="_blank">Mingjie Zhang</a><sup>1, 2</sup>,
@@ -24,9 +24,7 @@
     <a href="https://ieeexplore.ieee.org/document/11150727"><img alt="Paper" src="https://img.shields.io/badge/Paper-IEEE-blue"/></a>
     <a href="https://arxiv.org/abs/2504.14478"><img alt="Paper" src="https://img.shields.io/badge/Paper-arXiv-red"/></a>
     <a href='https://robotics-star.com/ApexNav'><img src='https://img.shields.io/badge/Project_Page-ApexNav-green' alt='Project Page'></a>
-    <a href="https://github.com/Robotics-STAR-Lab/ApexNav/tree/Lite-Apexnav">
-      <img alt="Lite Version" src="https://img.shields.io/badge/Code-Lightweight%20Version-orange"/>
-    </a>
+
 <br>
 <br>
 
@@ -43,8 +41,6 @@
 </div>
 
 ## 📢 News
-
-- **[27/04/2026]**: 🌟 A **lightweight version** is now available! Thanks to [TracyLucia](https://github.com/TracyLucia) for contributing the lightweight version. Check out the [Lite-Apexnav](https://github.com/Robotics-STAR-Lab/ApexNav/tree/Lite-Apexnav) branch.
 - **[10/02/2026]**: ROS2 Jazzy support is now available! Thanks to [romaster93](https://github.com/romaster93) for contributing the ROS2 interface. Check out the [ros2-jazzy](https://github.com/Robotics-STAR-Lab/ApexNav/tree/ros2-jazzy) branch.
 - **[10/12/2025]**: ApexNav released real world test example code. Check out the [Real World README](./real_world_test_example/README.md) for more details.
 - **[07/09/2025]**: ApexNav has been published in the Early Access area on [IEEE Xplore](https://ieeexplore.ieee.org/document/11150727).
@@ -196,6 +192,7 @@ ln -s hm3d hm3d_v0.2 # Create a symbolic link for hm3d_v0.2
 # Create necessary directory structure
 mkdir -p data/datasets/objectnav/hm3d
 mkdir -p data/datasets/objectnav/mp3d
+mkdir -p data/datasets/instance_imagenav/hm3d/v3
 
 # HM3D-v0.1
 wget -O data/datasets/objectnav/hm3d/v1.zip https://dl.fbaipublicfiles.com/habitat/data/datasets/objectnav/hm3d/v1/objectnav_hm3d_v1.zip
@@ -208,6 +205,11 @@ unzip data/datasets/objectnav/hm3d/v2.zip -d data/datasets/objectnav/hm3d && mv 
 # MP3D
 wget -O data/datasets/objectnav/mp3d/v1.zip https://dl.fbaipublicfiles.com/habitat/data/datasets/objectnav/m3d/v1/objectnav_mp3d_v1.zip
 unzip data/datasets/objectnav/mp3d/v1.zip -d data/datasets/objectnav/mp3d/v1 && rm data/datasets/objectnav/mp3d/v1.zip
+
+# HM3D InstanceImageNav-v3 (for insinav entry)
+# Put the extracted files to:
+# data/datasets/instance_imagenav/hm3d/v3/val/val.json.gz
+# data/datasets/instance_imagenav/hm3d/v3/val/content/*.json.gz
 ```
 
 <details>
@@ -280,6 +282,7 @@ source ./devel/setup.bash
 python habitat_evaluation.py --dataset hm3dv1
 python habitat_evaluation.py --dataset hm3dv2 # default
 python habitat_evaluation.py --dataset mp3d
+python habitat_evaluation.py --dataset insinav # InstanceImageNav(HM3D-v3), uses CLIP image-image score
 
 # You can also evaluate on one specific episode.
 python habitat_evaluation.py --dataset hm3dv2 test_epi_num=10 # episode_id 10
@@ -319,7 +322,6 @@ If you want to run the real-world test example inside the Habitat simulator, ple
 - [x] Add datasets download documentation
 - [x] Release the code of real-world deployment
 - [x] Add ROS2 support
-- [x] Add the lightweight version of ApexNav
 
 
 ## 📚 Acknowledgment

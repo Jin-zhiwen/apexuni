@@ -1,0 +1,51 @@
+detector:
+  yolo:
+    confidence_threshold_yolo: 0.3
+    iou_threshold_yolo: 0.5
+    agnostic_nms: True
+
+  groundingDINO:
+    confidence_threshold_dino: 0.35
+    text_threshold: 0.20
+
+goal:
+  goal_type: ins-image
+  image_path: "/home/ubuntu/ApexNav/data/insinav_goal_images/goals_4ok3usBNeis_8_episode_0.png"
+  goal_label: ""
+  goal_image_topic: ""
+  infer_label: true
+  yolo_port: 12184
+
+insinav_filter:
+  enabled: true
+  use_similar_set: true
+  goal_topk: 2
+  no_detection_patience: 8
+
+clip:
+  model_name: "dino_vits16"
+  device: "cuda"
+
+lightglue:
+  enabled: true
+  device: "cuda"
+  max_num_keypoints: 1024
+  min_match_points: 30
+  blend_weight: 0.5
+  hard_gate: false
+  crop_padding_ratio: 0.1
+
+habitat_sensor:
+  camera_height: 0.88
+
+llm:
+  llm_answer_path: llm/answers/llm_answer_hm3d.txt
+  llm_response_path: llm/answers/llm_response_list.txt
+  llm_client:
+    llm_client: ollama
+    ollama: "qwen3:8b"
+
+record_file_name: "record.txt"
+continue_file_name: "continue.txt"
+need_video: false
+video_output_path: "videos/test_insinav_{split}"

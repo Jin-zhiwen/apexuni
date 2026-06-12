@@ -10,6 +10,9 @@
     <arg name="cy_"/>
     <arg name="fx_"/>
     <arg name="fy_"/>
+    <arg name="filter_min_height_" default="0.28"/>
+    <arg name="filter_max_height_" default="1.18"/>
+    <arg name="object_process_min_pitch_" default="1.5"/>
 
     <!-- Real-world mode flag (default to false for simulation) -->
     <arg name="is_real_world_" default="false"/>
@@ -51,8 +54,9 @@
         <param name="map_ros/depth_filter_maxdist" value="4.99"/>
         <param name="map_ros/depth_filter_mindist" value="0.0"/>
         <param name="map_ros/depth_filter_margin" value="2"/>
-        <param name="map_ros/filter_min_height" value="0.28"/>
-        <param name="map_ros/filter_max_height" value="1.18"/>
+        <param name="map_ros/filter_min_height" value="$(arg filter_min_height_)"/>
+        <param name="map_ros/filter_max_height" value="$(arg filter_max_height_)"/>
+        <param name="map_ros/object_process_min_pitch" value="$(arg object_process_min_pitch_)"/>
         <param name="map_ros/k_depth_scaling_factor" value="65535.0"/>
         <param name="map_ros/skip_pixel" value="1"/>
         <param name="map_ros/frame_id" value="world"/>

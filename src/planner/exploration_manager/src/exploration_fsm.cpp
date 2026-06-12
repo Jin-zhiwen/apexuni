@@ -94,7 +94,7 @@ void ExplorationFSM::FSMCallback(const ros::TimerEvent& e)
         ROS_WARN("Init Mode Process -----> (%d/26)", fd_->init_action_count_);
         fd_->init_action_count_++;
         transitState(ROS_STATE::PUB_ACTION, "FSM");
-        updateFrontierAndObject();
+        updateFrontierAndObject(false);
       }
       else {
         // Main planning phase: determine robot pose and call action planner
@@ -111,8 +111,25 @@ void ExplorationFSM::FSMCallback(const ros::TimerEvent& e)
         expl_state_msg.data = fd_->final_result_;
         expl_state_pub_.publish(expl_state_msg);
         if (fd_->final_result_ == FINAL_RESULT::EXPLORE ||
-            fd_->final_result_ == FINAL_RESULT::SEARCH_OBJECT)
+            fd_->final_result_ == FINAL_RESULT::SEARCH_OBJECT) {
+          fd_->no_frontier_count_ = 0;
           transitState(ROS_STATE::PUB_ACTION, "FSM");
+        }
+        else if (fd_->final_result_ == FINAL_RESULT::NO_FRONTIER) {
+          // Do not terminate immediately on no-frontier; continue active exploration.
+          // This prevents the "spin once then exit" behavior on sparse/ambiguous semantic cues.
+          fd_->dormant_frontier_flag_ = true;
+          fd_->replan_flag_ = true;
+
+          const int phase = fd_->no_frontier_count_ % 4;
+          if (phase == 0 || phase == 2)
+            fd_->newest_action_ = ACTION::TURN_LEFT;
+          else
+            fd_->newest_action_ = ACTION::MOVE_FORWARD;
+          fd_->no_frontier_count_++;
+
+          transitState(ROS_STATE::PUB_ACTION, "FSM_NO_FRONTIER_RECOVERY");
+        }
         else
           transitState(ROS_STATE::FINISH, "FSM");
       }
@@ -579,7 +596,7 @@ void ExplorationFSM::clearVisMarker()
   visualization_->drawLines({}, fp_->vis_scale_, Vector4d(0, 0, 1, 1), "next_path", 1, 6);
 }
 
-bool ExplorationFSM::updateFrontierAndObject()
+bool ExplorationFSM::updateFrontierAndObject(bool enable_dormant)
 {
   bool change_flag = false;
   auto frt_map = expl_manager_->frontier_map2d_;
@@ -589,7 +606,8 @@ bool ExplorationFSM::updateFrontierAndObject()
 
   change_flag = frt_map->isAnyFrontierChanged();
   frt_map->searchFrontiers();
-  change_flag |= frt_map->dormantSeenFrontiers(start_pos2d, fd_->start_yaw_(0));
+  if (enable_dormant)
+    change_flag |= frt_map->dormantSeenFrontiers(start_pos2d, fd_->start_yaw_(0));
   frt_map->getFrontiers(ed->frontiers_, ed->frontier_averages_);
   frt_map->getDormantFrontiers(ed->dormant_frontiers_, ed->dormant_frontier_averages_);
   obj_map->getObjects(ed->objects_, ed->object_averages_, ed->object_labels_);

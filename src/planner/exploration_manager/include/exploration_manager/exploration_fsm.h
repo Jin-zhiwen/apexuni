@@ -106,7 +106,7 @@ private:
       const Vector2d& target_pos, const Vector2d& step);
 
   /* Helper functions */
-  bool updateFrontierAndObject();
+  bool updateFrontierAndObject(bool enable_dormant = true);
   void transitState(ROS_STATE new_state, string pos_call);
   void wrapAngle(double& angle);
   void publishRobotMarker();

@@ -1,28 +1,73 @@
-
-data
-
-outputs
-videos
-
-__pycache__/
-*.egg-info
-
-build
-devel
-lockfiles
-
+# Catkin / ROS build outputs
+build/
+devel/
+install/
 .catkin_workspace
-.vscode
 
-yolov7
+# Python cache / package metadata
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+*.egg
+
+# Runtime outputs
+outputs/
+videos/
+bag/
+*.bag
+wandb/
+
+# Large datasets and model weights
+data/
 traced_model.pt
-GroundingDINO
-habitat-lab
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
 
-# src/planner/utils/lkh_mtsp_solver/LKH/LKH
-# src/planner/utils/lkh_mtsp_solver/LKH/SRC/OBJ/*.o
+# External third-party repositories
+GroundingDINO/
+habitat-lab/
+yolov7/
+
+# Generated planner files
 *.atsp
 *.tour
 *.par
-bag
-wandb
+
+# Lock / temp files
+lockfiles/
+*.log
+*.tmp
+*.swp
+.DS_Store
+
+# large model/data files
+*.pt
+*.pth
+*.zip
+*.tar
+*.tar.gz
+*.glb
+*.gif
+
+data/
+assets/video_plant.gif
+
+# nested repos / external dependencies
+habitat-lab/
+yolov7/
+
+# cache
+__pycache__/
+*.pyc
+.cache/
+
+
+# IDE
+.vscode/
+.idea/
+
