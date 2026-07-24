@@ -1,0 +1,4 @@
+# @package _global_
+ablation:
+  name: wo_active_inspection
+video_output_path: "videos/ablation/wo_active_inspection_{split}"

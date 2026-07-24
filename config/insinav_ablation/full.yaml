@@ -1,0 +1,4 @@
+# @package _global_
+ablation:
+  name: full
+video_output_path: "videos/ablation/full_{split}"

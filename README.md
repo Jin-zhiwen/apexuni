@@ -279,14 +279,11 @@ python -m vlm.detector.yolov7 --port 12184
 
 ### MASt3R Close-Range Refinement
 The `insinav` pipeline can optionally use local `mast3r/` for close-range goal-view refinement.
-There are two confirmation routes. In the primary route, LightGlue runs independently on every
-frame; once confirmed, object-map or guarded visual approach moves toward the target, and entering
-the MASt3R distance gate invokes one pose estimate without any DINO stability requirement. In the
-fallback route, when LightGlue is not confirmed, a stable DINO crop candidate can invoke MASt3R
-without a candidate-depth gate. That fallback tracks the same mask across frames and keeps only
-MASt3R correspondences inside both the goal and current candidate masks.
+There are three evidence routes: boxed full-frame LightGlue with crop ownership,
+detector-independent full-frame LightGlue, and a stable DINO-candidate fallback. All routes use
+the same MASt3R quality gate before terminal control.
 
-Both MASt3R routes estimate once and send one locked `(x, y, yaw)` target to ROS. The planner runs
+The routes estimate once and send one locked `(x, y, yaw)` target to ROS. The planner runs
 one A* search, follows the fixed path, then aligns the same target yaw before STOP; failure or
 timeout releases the target back to normal exploration without forcing STOP or replanning a
 second MASt3R target.

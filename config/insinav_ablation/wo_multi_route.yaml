@@ -1,0 +1,8 @@
+# @package _global_
+ablation:
+  name: wo_multi_route
+  routes:
+    boxed_lightglue: false
+    no_box_lightglue: false
+    dino_direct: true
+video_output_path: "videos/ablation/wo_multi_route_{split}"

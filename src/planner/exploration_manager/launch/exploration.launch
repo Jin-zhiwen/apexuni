@@ -22,6 +22,7 @@
   <arg name="object_process_min_pitch" default="1.5"/>
   <arg name="semantic_gate_enabled" default="true"/>
   <arg name="semantic_gate_threshold" default="0.45"/>
+  <arg name="object_viewpoint_enabled" default="true"/>
   <arg name="object_viewpoint_max_failed_inspections" default="2"/>
   <arg name="object_viewpoint_failure_cooldown_sequences" default="30"/>
   <arg name="object_viewpoint_retry_score_margin" default="0.05"/>
@@ -48,6 +49,7 @@
     <arg name="object_process_min_pitch_" value="$(arg object_process_min_pitch)"/>
     <arg name="semantic_gate_enabled_" value="$(arg semantic_gate_enabled)"/>
     <arg name="semantic_gate_threshold_" value="$(arg semantic_gate_threshold)"/>
+    <arg name="object_viewpoint_enabled_" value="$(arg object_viewpoint_enabled)"/>
     <arg name="object_viewpoint_max_failed_inspections_"
          value="$(arg object_viewpoint_max_failed_inspections)"/>
     <arg name="object_viewpoint_failure_cooldown_sequences_"

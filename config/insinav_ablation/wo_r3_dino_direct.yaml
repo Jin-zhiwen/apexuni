@@ -1,0 +1,6 @@
+# @package _global_
+ablation:
+  name: wo_r3_dino_direct
+  routes:
+    dino_direct: false
+video_output_path: "videos/ablation/wo_r3_dino_direct_{split}"

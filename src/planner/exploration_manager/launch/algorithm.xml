@@ -15,6 +15,7 @@
     <arg name="object_process_min_pitch_" default="1.5"/>
     <arg name="semantic_gate_enabled_" default="true"/>
     <arg name="semantic_gate_threshold_" default="0.45"/>
+    <arg name="object_viewpoint_enabled_" default="true"/>
     <arg name="object_viewpoint_max_failed_inspections_" default="2"/>
     <arg name="object_viewpoint_failure_cooldown_sequences_" default="30"/>
     <arg name="object_viewpoint_retry_score_margin_" default="0.05"/>
@@ -90,7 +91,8 @@
         <!-- A stable DINO crop creates one finite inspection task independently of frontier
              score. It precomputes distinct safe viewpoints around the object, but exposes only
              one fixed target at a time; LightGlue/MASt3R can temporarily preempt it. -->
-        <param name="exploration/object_viewpoint/enabled" value="true" type="bool"/>
+        <param name="exploration/object_viewpoint/enabled"
+               value="$(arg object_viewpoint_enabled_)" type="bool"/>
         <param name="exploration/object_viewpoint/min_score" value="0.50" type="double"/>
         <param name="exploration/object_viewpoint/standoff_near" value="1.40" type="double"/>
         <param name="exploration/object_viewpoint/standoff_mid" value="1.70" type="double"/>

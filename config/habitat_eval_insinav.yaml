@@ -52,6 +52,10 @@ habitat:
 # Keep detection branch unchanged for compatibility with existing object map fusion
 # (detector scores are still sent through /detector/clouds_with_scores)
 detector:
+  # Use distinct ports for each parallel ablation worker.
+  grounding_dino_server_port: 12181
+  sam_server_port: 12183
+  yolo_server_port: 12184
   yolo:
     confidence_threshold_yolo: 0.3
     iou_threshold_yolo: 0.5
@@ -186,6 +190,24 @@ mast3r_refine:
     min_candidate_iou: 0.20
     retry_cooldown_steps: 15
 
+# Controlled experiment switches. Files in config/insinav_ablation override only
+# these fields (plus the output directory), so all other evaluation settings remain
+# identical across rows in the ablation table.
+ablation:
+  name: "full"
+  routes:
+    boxed_lightglue: true       # R1: full-frame/crop-owned LightGlue -> MASt3R
+    no_box_lightglue: true      # R2: detector-independent full-frame LightGlue -> MASt3R
+    dino_direct: true           # R3: stable DINO candidate -> MASt3R
+  boxed:
+    full_frame_gate: true
+    crop_ownership: true
+  terminal:
+    # geometry: quality-gated fixed SE(2) + final yaw alignment (Full)
+    # rgbd_after_geometry: same route and MASt3R gate, RGB-D stop/approach only
+    # rgbd: no MASt3R; sensor RGB-D stop after boxed instance confirmation (B0)
+    mode: "geometry"
+
 default_fusion_threshold: 0.5
 
 llm:
@@ -200,3 +222,6 @@ continue_file_name: "continue.txt"
 need_video: false
 video_output_path: "videos/test_insinav_{split}"
 test_epi_num: -1
+# -1 evaluates the complete split. A positive value evaluates/resumes the first N
+# episodes and is intended for fixed-subset ablation screening.
+max_eval_episodes: -1

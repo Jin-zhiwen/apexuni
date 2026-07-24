@@ -8,9 +8,29 @@ from vlm.itm.blip2itm import BLIP2ITMClient
 from vlm.utils.get_itm_message import get_itm_message
 
 yolov7_detector = YOLOv7Client(port=12184)
+_yolov7_detectors = {12184: yolov7_detector}
 blip2_itm = BLIP2ITMClient(port=12182)
 sam_segmentor = MobileSAMClient(port=12183)
 dino_detector = GroundingDINOClient(port=12181)
+
+
+def configure_detection_clients(cfg):
+    """Point process-global detector helpers at this worker's isolated servers."""
+    global sam_segmentor, dino_detector
+    sam_segmentor = MobileSAMClient(port=int(getattr(cfg, "sam_server_port", 12183)))
+    dino_detector = GroundingDINOClient(
+        port=int(getattr(cfg, "grounding_dino_server_port", 12181))
+    )
+    _get_yolov7_detector(cfg)
+
+
+def _get_yolov7_detector(cfg):
+    port = int(getattr(cfg, "yolo_server_port", 12184))
+    detector = _yolov7_detectors.get(port)
+    if detector is None:
+        detector = YOLOv7Client(port=port)
+        _yolov7_detectors[port] = detector
+    return detector
 
 
 def _norm_label(text: str) -> str:
@@ -127,8 +147,12 @@ def get_object(right_label, img, cfg, similar_answer, use_label_filter: bool = T
         coco_label = list(COCO_CLASSES)
 
     if coco_label:
-        detections = yolov7_detector.predict(img, agnostic_nms=cfg.yolo.agnostic_nms, 
-                                            conf_thres=cfg.yolo.confidence_threshold_yolo, iou_thres=cfg.yolo.iou_threshold_yolo)
+        detections = _get_yolov7_detector(cfg).predict(
+            img,
+            agnostic_nms=cfg.yolo.agnostic_nms,
+            conf_thres=cfg.yolo.confidence_threshold_yolo,
+            iou_thres=cfg.yolo.iou_threshold_yolo,
+        )
         for idx in range(len(detections.logits)):
             label_detected = detections.phrases[idx]
             score = detections.logits[idx].item()
@@ -203,8 +227,12 @@ def get_object_with_itm(label, img, cfg):
     itm_score_list = []
     segmented_img = img.copy()
     if label in COCO_CLASSES:
-        detections = yolov7_detector.predict(img, agnostic_nms=cfg.yolo.agnostic_nms,
-                                             conf_thres=cfg.yolo.confidence_threshold_yolo, iou_thres=cfg.yolo.iou_threshold_yolo)
+        detections = _get_yolov7_detector(cfg).predict(
+            img,
+            agnostic_nms=cfg.yolo.agnostic_nms,
+            conf_thres=cfg.yolo.confidence_threshold_yolo,
+            iou_thres=cfg.yolo.iou_threshold_yolo,
+        )
         for idx in range(len(detections.logits)):
             label_detected = detections.phrases[idx]
             score = detections.logits[idx].item()
@@ -261,4 +289,3 @@ def crop_and_expand_box(img, detections, idx, expand_pixels=0.4):
     img_detected = img[y_min:y_max+1, x_min:x_max+1]
 
     return img_detected
-

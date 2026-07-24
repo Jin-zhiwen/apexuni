@@ -1,0 +1,6 @@
+# @package _global_
+ablation:
+  name: wo_r1_boxed
+  routes:
+    boxed_lightglue: false
+video_output_path: "videos/ablation/wo_r1_boxed_{split}"

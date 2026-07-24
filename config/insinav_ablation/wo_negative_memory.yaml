@@ -1,0 +1,4 @@
+# @package _global_
+ablation:
+  name: wo_negative_memory
+video_output_path: "videos/ablation/wo_negative_memory_{split}"

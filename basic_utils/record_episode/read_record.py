@@ -130,3 +130,34 @@ def read_diagnostic_counts(continue_path, termination_reasons, failure_events, f
             event_counts[event] = int(match.group(1))
 
     return termination_counts, event_counts
+
+
+def read_goal_view_totals(continue_path, flag_once=False):
+    """Restore cumulative goal-view sums so resumed evaluations keep valid averages."""
+    totals = {
+        "position_error_sum": 0.0,
+        "yaw_error_sum": 0.0,
+        "eval_count": 0,
+        "success_count": 0,
+    }
+    if flag_once or not os.path.exists(continue_path):
+        return totals
+
+    with open(continue_path, "r", encoding="utf-8") as file:
+        content = file.read()
+    records = re.split(r"Scene ID: ", content)
+    if len(records) <= 1:
+        return totals
+
+    latest_record = records[1]
+    patterns = {
+        "position_error_sum": r"Total Goal-View Pos Error Sum\s+\|\s+([\d\.]+)",
+        "yaw_error_sum": r"Total Goal-View Yaw Error Sum\s+\|\s+([\d\.]+)",
+        "eval_count": r"Total Goal-View Eval Count\s+\|\s+(\d+)",
+        "success_count": r"Total View Success@0\.25m,10deg\s+\|\s+(\d+)",
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, latest_record)
+        if match:
+            totals[key] = int(match.group(1)) if key.endswith("count") else float(match.group(1))
+    return totals

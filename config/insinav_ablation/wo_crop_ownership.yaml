@@ -1,0 +1,6 @@
+# @package _global_
+ablation:
+  name: wo_crop_ownership
+  boxed:
+    crop_ownership: false
+video_output_path: "videos/ablation/wo_crop_ownership_{split}"

@@ -72,7 +72,11 @@ from basic_utils.failure_check.failure_check import check_failure, is_on_same_fl
 from basic_utils.object_point_cloud_utils.object_point_cloud import (
     get_object_point_cloud,
 )
-from basic_utils.record_episode.read_record import read_diagnostic_counts, read_record
+from basic_utils.record_episode.read_record import (
+    read_diagnostic_counts,
+    read_goal_view_totals,
+    read_record,
+)
 from basic_utils.record_episode.write_record import write_record
 from habitat2ros import habitat_publisher
 from llm.answer_reader.answer_reader import read_answer
@@ -96,7 +100,7 @@ from vlm.itm.mast3r_refiner import (
     _normalize_depth,
 )
 from vlm.detector.yolov7 import YOLOv7Client
-from vlm.utils.get_object_utils import get_object
+from vlm.utils.get_object_utils import configure_detection_clients, get_object
 
 
 def _load_json(path):
@@ -1039,6 +1043,32 @@ def main(cfg: DictConfig) -> None:
         if insinav_filter_cfg is not None
         else 3
     )
+    ablation_cfg = cfg.get("ablation", {}) or {}
+    ablation_name = str(ablation_cfg.get("name", "full"))
+    route_cfg = ablation_cfg.get("routes", {}) or {}
+    boxed_cfg = ablation_cfg.get("boxed", {}) or {}
+    terminal_cfg = ablation_cfg.get("terminal", {}) or {}
+    boxed_lightglue_enabled = bool(route_cfg.get("boxed_lightglue", True))
+    no_box_lightglue_enabled = bool(route_cfg.get("no_box_lightglue", True))
+    dino_direct_route_enabled = bool(route_cfg.get("dino_direct", True))
+    boxed_full_frame_gate_enabled = bool(boxed_cfg.get("full_frame_gate", True))
+    boxed_crop_ownership_enabled = bool(boxed_cfg.get("crop_ownership", True))
+    terminal_mode = str(terminal_cfg.get("mode", "geometry")).strip().lower()
+    if terminal_mode not in {"geometry", "rgbd_after_geometry", "rgbd"}:
+        raise ValueError(
+            "ablation.terminal.mode must be geometry, rgbd_after_geometry, or rgbd; "
+            f"got {terminal_mode!r}"
+        )
+    print(
+        "[INSiNav_ABLATION] "
+        f"name={ablation_name}, routes="
+        f"R1:{int(boxed_lightglue_enabled)}/"
+        f"R2:{int(no_box_lightglue_enabled)}/"
+        f"R3:{int(dino_direct_route_enabled)}, "
+        f"boxed_full_frame_gate={int(boxed_full_frame_gate_enabled)}, "
+        f"crop_ownership={int(boxed_crop_ownership_enabled)}, "
+        f"terminal={terminal_mode}"
+    )
 
     category_to_coco = {}
     id_to_name = {}
@@ -1067,12 +1097,14 @@ def main(cfg: DictConfig) -> None:
     need_video = cfg.need_video
     record_file_path = os.path.join(video_output_path, cfg.record_file_name)
     continue_path = os.path.join(video_output_path, cfg.continue_file_name)
+    route_metrics_path = os.path.join(video_output_path, "route_metrics.jsonl")
     max_episode_steps = cfg.habitat.environment.max_episode_steps
     success_distance = cfg.habitat.task.measurements.success.success_distance
     rgb_sensor_cfg = cfg.habitat.simulator.agents.main_agent.sim_sensors.rgb_sensor
     depth_sensor_cfg = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor
 
     detector_cfg = cfg.detector
+    configure_detection_clients(detector_cfg)
 
     llm_client = None
     llm_answer_path = None
@@ -1104,7 +1136,7 @@ def main(cfg: DictConfig) -> None:
         else {}
     ) or {}
     lightglue_no_box_enabled = bool(
-        lightglue_no_box_cfg.get("enabled", False)
+        no_box_lightglue_enabled and lightglue_no_box_cfg.get("enabled", False)
     )
     lightglue_no_box_match_threshold = max(
         1.0, float(lightglue_no_box_cfg.get("match_points_threshold", 300))
@@ -1129,12 +1161,18 @@ def main(cfg: DictConfig) -> None:
         clip_client = DINOSimilarity(
             model_name=clip_cfg.model_name, device=clip_cfg.device
         )
-        goal_yolo_client = YOLOv7Client(port=12184)
+        goal_yolo_client = YOLOv7Client(
+            port=int(detector_cfg.get("yolo_server_port", 12184))
+        )
         print(
             f"InstanceImageNav mode enabled, DINO model={clip_cfg.model_name}, device={clip_client.device}"
         )
 
-        if lightglue_cfg is not None and lightglue_cfg.get("enabled", False):
+        if (
+            lightglue_cfg is not None
+            and lightglue_cfg.get("enabled", False)
+            and (boxed_lightglue_enabled or lightglue_no_box_enabled)
+        ):
             lightglue_verifier = LightGlueVerifier(
                 device=lightglue_cfg.get("device", "cuda"),
                 max_num_keypoints=lightglue_cfg.get("max_num_keypoints", 1024),
@@ -1261,6 +1299,12 @@ def main(cfg: DictConfig) -> None:
     env = habitat.Env(cfg)
     print("Environment creation successful")
     number_of_episodes = env.number_of_episodes
+    configured_eval_episodes = int(cfg.get("max_eval_episodes", -1))
+    evaluation_total = (
+        number_of_episodes
+        if configured_eval_episodes <= 0
+        else min(number_of_episodes, configured_eval_episodes)
+    )
 
     # Read previous records and set initial values
     (
@@ -1278,15 +1322,18 @@ def main(cfg: DictConfig) -> None:
         RECOVERABLE_FAILURE_EVENTS,
         flag_once,
     )
+    goal_view_totals = read_goal_view_totals(continue_path, flag_once)
 
-    if num_total >= number_of_episodes:
-        raise ValueError("Already finished all episodes.")
+    if not flag_once and num_total >= evaluation_total:
+        raise ValueError(
+            f"Already finished the configured {evaluation_total} evaluation episodes."
+        )
 
-    pbar = tqdm.tqdm(total=env.number_of_episodes)
-    goal_view_error_all = 0.0
-    goal_yaw_error_all = 0.0
-    goal_view_eval_count = 0
-    goal_view_success_count = 0
+    pbar = tqdm.tqdm(total=evaluation_total)
+    goal_view_error_all = goal_view_totals["position_error_sum"]
+    goal_yaw_error_all = goal_view_totals["yaw_error_sum"]
+    goal_view_eval_count = goal_view_totals["eval_count"]
+    goal_view_success_count = goal_view_totals["success_count"]
 
     env_count = num_total if not flag_once else env_num_once
     while env_count:
@@ -1340,7 +1387,8 @@ def main(cfg: DictConfig) -> None:
     progress_pub = rospy.Publisher("/habitat/progress", Int32MultiArray, queue_size=10)
     record_pub = rospy.Publisher("/habitat/record", Float32MultiArray, queue_size=10)
 
-    for epi in range(number_of_episodes - num_total):
+    episodes_remaining = 1 if flag_once else evaluation_total - num_total
+    for epi in range(episodes_remaining):
         # Publish progress information
         publish_int32_array(progress_pub, [num_total, number_of_episodes])
 
@@ -1432,6 +1480,18 @@ def main(cfg: DictConfig) -> None:
         lightglue_no_box_retry_after_step = 0
         yaw_only_turn_steps = 0
         mast3r_adjustment_used = False
+        episode_route_stats = {
+            route: {
+                "triggers": 0,
+                "geometry_passes": 0,
+                "geometry_rejects": 0,
+                "approaches": 0,
+                "stops": 0,
+            }
+            for route in ("lightglue", "lightglue_no_box", "dino_direct")
+        }
+        episode_last_accepted_route = None
+        episode_stop_route = None
         fine_yaw_action_pending = False
         pending_fine_yaw_turn_deg = None
         episode_goal_image = None
@@ -2459,7 +2519,12 @@ def main(cfg: DictConfig) -> None:
                     # approach or MASt3R; this also prevents a lone similar-class box from
                     # bypassing the old multi-candidate-only check.
                     instance_crop_association_required = (
-                        full_frame_match_points >= association_trigger_points
+                        boxed_lightglue_enabled
+                        and boxed_crop_ownership_enabled
+                        and (
+                            full_frame_match_points >= association_trigger_points
+                            or not boxed_full_frame_gate_enabled
+                        )
                         and len(object_masks_list) > 0
                         and (
                             require_instance_crop_for_any_candidate
@@ -2608,7 +2673,9 @@ def main(cfg: DictConfig) -> None:
                 direct_cfg = (
                     mast3r_cfg.get("direct", {}) if mast3r_cfg is not None else {}
                 )
-                mast3r_direct_enabled = bool(direct_cfg.get("enabled", False))
+                mast3r_direct_enabled = bool(
+                    dino_direct_route_enabled and direct_cfg.get("enabled", False)
+                )
                 mast3r_direct_dino_threshold = float(
                     direct_cfg.get("dino_threshold", 0.60)
                 )
@@ -2689,13 +2756,31 @@ def main(cfg: DictConfig) -> None:
                         and approach_candidate_label == goal_clean_label_idx
                     )
                 )
-                current_approach_confirmed = (
-                    approach_match_points >= approach_threshold
-                    and (
-                        not instance_crop_association_required
-                        or instance_crop_association_passed
+                boxed_full_frame_passed = (
+                    not boxed_full_frame_gate_enabled
+                    or full_frame_match_points >= approach_threshold
+                )
+                boxed_crop_evidence_passed = (
+                    not boxed_crop_ownership_enabled
+                    or (
+                        instance_crop_association_required
+                        and instance_crop_association_passed
                     )
+                )
+                boxed_approach_confirmed = (
+                    boxed_lightglue_enabled
+                    and approach_candidate_idx is not None
+                    and boxed_full_frame_passed
+                    and boxed_crop_evidence_passed
                     and approach_candidate_matches_goal_label
+                )
+                no_box_visual_confirmed = (
+                    lightglue_no_box_enabled
+                    and approach_candidate_idx is None
+                    and full_frame_match_points >= approach_threshold
+                )
+                current_approach_confirmed = (
+                    boxed_approach_confirmed or no_box_visual_confirmed
                 )
                 if current_approach_confirmed:
                     confirmed_approach_active = True
@@ -2792,12 +2877,29 @@ def main(cfg: DictConfig) -> None:
 
                 insinav_stop_gate_passed = False
 
+                # B0 uses the boxed instance confirmation and sensor depth only. This never
+                # reads Habitat's oracle distance-to-goal metric.
+                if (
+                    terminal_mode == "rgbd"
+                    and boxed_approach_confirmed
+                    and np.isfinite(approach_reference_distance)
+                    and approach_reference_distance <= stop_distance
+                ):
+                    insinav_stop_gate_passed = True
+                    global_action = ACTION.STOP
+                    episode_stop_route = "lightglue"
+                    episode_route_stats["lightglue"]["stops"] += 1
+                    print(
+                        "[INSiNav_RGBD_TERMINAL] boxed instance confirmed; "
+                        f"sensor_depth={approach_reference_distance:.3f} <= "
+                        f"stop_distance={stop_distance:.3f}"
+                    )
+
                 lightglue_geometry_ready = (
-                    current_approach_confirmed
+                    boxed_lightglue_enabled
+                    and boxed_approach_confirmed
                     and approach_candidate_idx is not None
                     and approach_candidate_matches_goal_label
-                    and instance_crop_association_required
-                    and instance_crop_association_passed
                     and (not mast3r_use_detection_masks or goal_clean_mask is not None)
                 )
                 lightglue_should_latch_mast3r = (
@@ -2959,6 +3061,7 @@ def main(cfg: DictConfig) -> None:
                         refine_trigger_source = "lightglue_no_box"
                     else:
                         refine_trigger_source = "dino_direct"
+                    episode_route_stats[refine_trigger_source]["triggers"] += 1
                     if not mast3r_use_detection_masks:
                         mast3r_latched_current_mask = None
                     elif refine_trigger_source == "dino_direct":
@@ -3073,6 +3176,12 @@ def main(cfg: DictConfig) -> None:
                         f"route={refine_trigger_source}, "
                         f"reason={mast3r_validation_reason}"
                     )
+                    route_result_key = (
+                        "geometry_passes" if mast3r_result_accepted else "geometry_rejects"
+                    )
+                    episode_route_stats[refine_trigger_source][route_result_key] += 1
+                    if mast3r_result_accepted:
+                        episode_last_accepted_route = refine_trigger_source
                     mast3r_hint_active = mast3r_result_accepted
 
                 mast3r_hint_allow_stop = False
@@ -3082,12 +3191,37 @@ def main(cfg: DictConfig) -> None:
                 mast3r_hint_transl = 0.0
                 mast3r_hint_depth = 0.0
                 if mast3r_result is not None and mast3r_result_accepted:
-                    mast3r_hint_allow_stop = bool(mast3r_result.should_stop)
+                    mast3r_hint_allow_stop = bool(
+                        terminal_mode == "geometry" and mast3r_result.should_stop
+                    )
                     mast3r_hint_yaw = float(mast3r_result.yaw_error_deg)
                     mast3r_hint_forward = float(mast3r_result.forward_error)
                     mast3r_hint_lateral = float(mast3r_result.lateral_error)
                     mast3r_hint_transl = float(mast3r_result.transl_error)
                     mast3r_hint_depth = float(mast3r_result.depth_error)
+
+                rgbd_terminal_distance = float("inf")
+                rgbd_terminal_candidate_idx = None
+                if mast3r_result_accepted and terminal_mode == "rgbd_after_geometry":
+                    depth_cfg = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor
+                    if refine_trigger_source == "lightglue":
+                        rgbd_terminal_distance = approach_reference_distance
+                        rgbd_terminal_candidate_idx = approach_candidate_idx
+                    elif refine_trigger_source == "dino_direct":
+                        rgbd_terminal_candidate_idx = current_best_crop_idx
+                        if current_best_crop_mask is not None:
+                            rgbd_terminal_distance = estimate_mask_depth_distance(
+                                observations["depth"],
+                                current_best_crop_mask,
+                                float(depth_cfg.min_depth),
+                                float(depth_cfg.max_depth),
+                            )
+                    else:
+                        rgbd_terminal_distance = estimate_center_depth_distance(
+                            observations["depth"],
+                            float(depth_cfg.min_depth),
+                            float(depth_cfg.max_depth),
+                        )
 
                 if mast3r_hint_allow_stop or (
                     not mast3r_hint_active and not refine_goal_sent
@@ -3107,9 +3241,72 @@ def main(cfg: DictConfig) -> None:
                     if (
                         mast3r_result is not None
                         and mast3r_result_accepted
+                        and terminal_mode == "rgbd_after_geometry"
+                    ):
+                        accepted_route = refine_trigger_source
+                        publish_mast3r_hint(
+                            mast3r_hint_pub,
+                            active=False,
+                            allow_stop=False,
+                            yaw_error_deg=0.0,
+                            forward_error=0.0,
+                            lateral_error=0.0,
+                            transl_error=0.0,
+                            depth_error=0.0,
+                        )
+                        if (
+                            np.isfinite(rgbd_terminal_distance)
+                            and rgbd_terminal_distance <= stop_distance
+                        ):
+                            insinav_stop_gate_passed = True
+                            global_action = ACTION.STOP
+                            episode_stop_route = accepted_route
+                            episode_route_stats[accepted_route]["stops"] += 1
+                            print(
+                                "[INSiNav_RGBD_TERMINAL] MASt3R quality gate passed; "
+                                f"route={accepted_route}, "
+                                f"sensor_depth={rgbd_terminal_distance:.3f} <= "
+                                f"stop_distance={stop_distance:.3f}"
+                            )
+                        else:
+                            episode_route_stats[accepted_route]["approaches"] += 1
+                            if rgbd_terminal_candidate_idx is not None:
+                                confirmed_approach_active = True
+                                confirmed_approach_steps = 0
+                                verified_approach_candidate_idx = int(
+                                    rgbd_terminal_candidate_idx
+                                )
+                            elif (
+                                visual_approach_enabled
+                                and np.isfinite(rgbd_terminal_distance)
+                                and rgbd_terminal_distance >= visual_forward_clearance
+                            ):
+                                visual_approach_pending = True
+                                visual_approach_last_depth = rgbd_terminal_distance
+                            print(
+                                "[INSiNav_RGBD_TERMINAL] MASt3R quality gate passed; "
+                                f"route={accepted_route}, fixed_SE2=0, yaw_alignment=0, "
+                                f"sensor_depth={rgbd_terminal_distance:.3f}"
+                            )
+                        refine_latched = False
+                        refine_trigger_source = None
+                        refine_goal_sent = False
+                        refine_goal_sent_step = -1
+                        refine_finish_wait_cycles = 0
+                        mast3r_execution_retry_after_step = count_steps + 1
+                        mast3r_direct_score_streak = 0
+                        mast3r_direct_candidate_mask = None
+                        mast3r_direct_candidate_label = None
+                        mast3r_direct_latched_mask = None
+                        mast3r_latched_current_mask = None
+                    elif (
+                        mast3r_result is not None
+                        and mast3r_result_accepted
                         and mast3r_result.should_stop
                     ):
                         insinav_stop_gate_passed = True
+                        episode_stop_route = refine_trigger_source
+                        episode_route_stats[refine_trigger_source]["stops"] += 1
                         print(
                             "[INSiNav_DEBUG] stop triggered by latched MASt3R refinement: "
                             f"route={refine_trigger_source}, "
@@ -3126,6 +3323,7 @@ def main(cfg: DictConfig) -> None:
                         confirmed_approach_active = False
                         confirmed_approach_steps = 0
                     elif mast3r_result is not None and mast3r_result_accepted:
+                        episode_route_stats[refine_trigger_source]["approaches"] += 1
                         publish_mast3r_hint(
                             mast3r_hint_pub,
                             active=True,
@@ -3459,6 +3657,22 @@ def main(cfg: DictConfig) -> None:
         # Generate video file
         scene_id = env.current_episode.scene_id
         episode_id = env.current_episode.episode_id
+        if is_instance_imagenav:
+            route_record = {
+                "ablation": ablation_name,
+                "scene_id": scene_id,
+                "episode_id": str(episode_id),
+                "success": int(success),
+                "spl": float(spl),
+                "soft_spl": float(soft_spl),
+                "steps": int(count_steps),
+                "termination": episode_termination_reason,
+                "last_accepted_route": episode_last_accepted_route,
+                "stop_route": episode_stop_route,
+                "routes": episode_route_stats,
+            }
+            with open(route_metrics_path, "a", encoding="utf-8") as route_file:
+                route_file.write(json.dumps(route_record, ensure_ascii=True) + "\n")
         video_name = f"{os.path.basename(scene_id)}_{episode_id}"
         time_spend = time.time() - start_time + last_time
 
@@ -3517,6 +3731,8 @@ def main(cfg: DictConfig) -> None:
         for event in RECOVERABLE_FAILURE_EVENTS:
             table2.add_row([f"Total Event {event}", recoverable_failure_counts[event]])
         if goal_view_eval_count > 0:
+            table2.add_row(["Total Goal-View Pos Error Sum", f"{goal_view_error_all:.6f}"])
+            table2.add_row(["Total Goal-View Yaw Error Sum", f"{goal_yaw_error_all:.6f}"])
             table2.add_row(["Total Goal-View Eval Count", f"{goal_view_eval_count}"])
             table2.add_row(["Total View Success@0.25m,10deg", f"{goal_view_success_count}"])
 

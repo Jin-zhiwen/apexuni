@@ -1,0 +1,6 @@
+# @package _global_
+ablation:
+  name: wo_geometry_terminal
+  terminal:
+    mode: rgbd_after_geometry
+video_output_path: "videos/ablation/wo_geometry_terminal_{split}"

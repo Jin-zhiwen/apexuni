@@ -1,0 +1,6 @@
+# @package _global_
+ablation:
+  name: wo_boxed_full_frame_gate
+  boxed:
+    full_frame_gate: false
+video_output_path: "videos/ablation/wo_boxed_full_frame_gate_{split}"

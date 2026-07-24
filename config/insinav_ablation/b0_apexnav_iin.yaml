@@ -1,0 +1,25 @@
+# @package _global_
+ablation:
+  name: b0_apexnav_iin
+  routes:
+    boxed_lightglue: true
+    no_box_lightglue: false
+    dino_direct: false
+  boxed:
+    full_frame_gate: false
+    crop_ownership: true
+  terminal:
+    mode: rgbd
+clip:
+  topk: 1
+  dense_full_frame_value_map: false
+  publish_semantic_object_clouds: false
+lightglue:
+  verification_mode: crop
+  no_box_direct:
+    enabled: false
+mast3r_refine:
+  enabled: false
+  direct:
+    enabled: false
+video_output_path: "videos/ablation/b0_apexnav_iin_{split}"
