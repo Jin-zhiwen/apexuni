@@ -50,7 +50,36 @@ static const char* T_COLORS[] = {
 struct DetectedObject {
   pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> cloud;  ///< 3D point cloud of detected object
   double score;                                           ///< Confidence score from detector (0-1)
+  double semantic_score;                                  ///< DINO image-goal similarity score (0-1)
   int label;                                              ///< Semantic class label from detection
+};
+
+struct SemanticObjectCandidate {
+  int object_id = -1;
+  int label = -1;
+  int observation_count = 0;
+  unsigned long evidence_epoch = 0;
+  double semantic_score = -1.0;
+  double detector_score = 0.0;
+  Eigen::Vector2d center = Eigen::Vector2d::Zero();
+  pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> cloud;
+};
+
+struct SemanticInputDebugInfo {
+  unsigned long sequence = 0;
+  int received_clouds = 0;
+  int valid_clouds = 0;
+  int matched_clouds = 0;
+  int unmatched_clouds = 0;
+  int invalid_label_clouds = 0;
+  int above_gate_pairs = 0;
+  int stable_pairs = 0;
+  int best_object_id = -1;
+  int best_label = -1;
+  int best_streak = 0;
+  double gate_threshold = 0.0;
+  double best_score = -1.0;
+  double best_recent_score = -1.0;
 };
 
 struct Viewpoint2D {
@@ -83,7 +112,17 @@ struct ObjectCluster {
   vector<pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>> clouds_;  ///< Point clouds per semantic
                                                                     ///< class
   vector<double> confidence_scores_;    ///< Confidence scores per semantic class
+  vector<double> semantic_scores_;      ///< DINO similarity scores per semantic class
+  // Mean of the latest two consecutive scores above the semantic gate. This is the value used
+  // by the active DINO viewpoint route, rather than a long-running streak average.
+  vector<double> semantic_recent_scores_;
+  vector<double> semantic_previous_high_scores_;  ///< Previous high score for the two-frame mean
   vector<int> observation_nums_;        ///< Number of observations per class
+  vector<int> semantic_observation_nums_;  ///< Number of DINO observations per class
+  vector<int> semantic_high_score_streaks_;  ///< Consecutive DINO observations above the gate
+  // Incremented when a new consecutive-above-gate evidence run begins. It lets exploration
+  // suppress a completed inspection without permanently rejecting the physical object.
+  vector<unsigned long> semantic_evidence_epochs_;
   vector<int> observation_cloud_sums_;  ///< Total point count per class
 
   /**
@@ -93,7 +132,13 @@ struct ObjectCluster {
   ObjectCluster(int size = 5)
     : clouds_(size)
     , confidence_scores_(size, 0.0)
+    , semantic_scores_(size, -1.0)
+    , semantic_recent_scores_(size, -1.0)
+    , semantic_previous_high_scores_(size, -1.0)
     , observation_nums_(size, 0)
+    , semantic_observation_nums_(size, 0)
+    , semantic_high_score_streaks_(size, 0)
+    , semantic_evidence_epochs_(size, 0)
     , observation_cloud_sums_(size, 0)
   {
   }
@@ -108,7 +153,14 @@ public:
   void inputObservationObjectsCloud(
       const vector<pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>> observation_clouds,
       const double& itm_score);
+  void inputSemanticObjectClouds(const vector<DetectedObject>& semantic_objects);
   void setConfidenceThreshold(double val);
+  void setSemanticGate(bool enabled, double threshold);
+  bool isSemanticGateEnabled() const;
+  void rejectInstanceCandidate(const Eigen::Vector2d& pos, double radius);
+  void rejectSemanticObjectCandidate(int object_id);
+  void getSemanticObjectCandidates(vector<SemanticObjectCandidate>& candidates) const;
+  const SemanticInputDebugInfo& getSemanticInputDebugInfo() const;
 
   void getAllConfidenceObjectClouds(pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_clouds);
   void getTopConfidenceObjectCloud(
@@ -132,7 +184,9 @@ public:
 private:
   double fusionConfidenceScore(
       int total_last, double c_last, int n_now, double c_now, int total_now, int sum);
+  double fuseSemanticScore(double last_score, int last_obs, double now_score) const;
   void updateObjectBestLabel(int obj_idx);
+  int searchSemanticObjectCluster(const DetectedObject& semantic_object);
   Eigen::Vector4d getColor(const double& h, double alpha);
 
   bool haveOverlap(
@@ -146,6 +200,8 @@ private:
   vector<Eigen::Vector2i> allNeighbors(const Eigen::Vector2i& idx);
   vector<Eigen::Vector2i> allGridsDistance(const Eigen::Vector2i& idx, const double& dist);
   bool isConfidenceObject(const ObjectCluster& obj);
+  bool passSemanticGate(const ObjectCluster& obj) const;
+  bool isInstanceRejected(const ObjectCluster& obj) const;
   bool isNeighborUnknown(const Eigen::Vector2i& idx);
   bool isSatisfyObject(const Eigen::Vector2i& idx);
   bool isSatisfyObject(const Eigen::Vector2d& pos);
@@ -176,13 +232,25 @@ private:
   int fusion_type_;          ///< Confidence fusion algorithm type (0=replace, 1=weighted, 2=max)
   int min_observation_num_;  ///< Minimum observations required for confidence
   double min_confidence_;    ///< Minimum confidence threshold for object acceptance
+  bool semantic_gate_enabled_;      ///< Whether DINO score gates high-confidence object navigation
+  double semantic_gate_threshold_;  ///< Minimum DINO score for SEARCH_BEST_OBJECT candidates
+  double instance_reject_radius_;
   double resolution_;        ///< Grid resolution in meters
   double leaf_size_;         ///< Voxel size for point cloud downsampling
+
+  vector<Vector2d> rejected_instance_candidates_;
+  vector<int> rejected_semantic_candidate_ids_;
+  SemanticInputDebugInfo semantic_input_debug_;
 
   // System integration
   SDFMap2D* sdf_map_;
   unique_ptr<RayCaster2D> raycaster_;
 };
+
+inline const SemanticInputDebugInfo& ObjectMap2D::getSemanticInputDebugInfo() const
+{
+  return semantic_input_debug_;
+}
 
 inline void ObjectMap2D::printFusionInfo(const ObjectCluster& obj, int label, const char* state)
 {

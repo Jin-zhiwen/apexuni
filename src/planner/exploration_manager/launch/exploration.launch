@@ -20,6 +20,12 @@
   <arg name="filter_min_height" default="0.28"/>
   <arg name="filter_max_height" default="1.18"/>
   <arg name="object_process_min_pitch" default="1.5"/>
+  <arg name="semantic_gate_enabled" default="true"/>
+  <arg name="semantic_gate_threshold" default="0.45"/>
+  <arg name="object_viewpoint_max_failed_inspections" default="2"/>
+  <arg name="object_viewpoint_failure_cooldown_sequences" default="30"/>
+  <arg name="object_viewpoint_retry_score_margin" default="0.05"/>
+  <arg name="object_viewpoint_failure_spatial_radius" default="0.75"/>
 
   <group unless="$(arg is_real_world)">
     <rosparam file="$(find exploration_manager)/../../../config/$(arg eval_config)" command="load" />
@@ -40,6 +46,16 @@
     <arg name="filter_min_height_" value="$(arg filter_min_height)"/>
     <arg name="filter_max_height_" value="$(arg filter_max_height)"/>
     <arg name="object_process_min_pitch_" value="$(arg object_process_min_pitch)"/>
+    <arg name="semantic_gate_enabled_" value="$(arg semantic_gate_enabled)"/>
+    <arg name="semantic_gate_threshold_" value="$(arg semantic_gate_threshold)"/>
+    <arg name="object_viewpoint_max_failed_inspections_"
+         value="$(arg object_viewpoint_max_failed_inspections)"/>
+    <arg name="object_viewpoint_failure_cooldown_sequences_"
+         value="$(arg object_viewpoint_failure_cooldown_sequences)"/>
+    <arg name="object_viewpoint_retry_score_margin_"
+         value="$(arg object_viewpoint_retry_score_margin)"/>
+    <arg name="object_viewpoint_failure_spatial_radius_"
+         value="$(arg object_viewpoint_failure_spatial_radius)"/>
 
     <!-- intrinsic params of the depth camera -->
     <arg name="cx_" value="320"/>

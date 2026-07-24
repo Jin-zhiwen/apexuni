@@ -51,6 +51,32 @@ struct FSMData {
     stucking_points_.clear();
 
     local_pos_ = Eigen::Vector2d(0, 0);
+    mast3r_hint_active_ = false;
+    mast3r_allow_stop_ = false;
+    mast3r_yaw_error_deg_ = 0.0;
+    mast3r_forward_error_ = 0.0;
+    mast3r_lateral_error_ = 0.0;
+    mast3r_transl_error_ = 0.0;
+    mast3r_depth_error_ = 0.0;
+    mast3r_target_pos_ = Eigen::Vector2d(0, 0);
+    mast3r_target_yaw_ = 0.0;
+    mast3r_goal_active_ = false;
+    mast3r_path_active_ = false;
+    mast3r_segment_target_pos_ = Eigen::Vector2d::Zero();
+    mast3r_segment_target_valid_ = false;
+    mast3r_segment_count_ = 0;
+    mast3r_goal_age_ = 0;
+    mast3r_last_pos_ = Eigen::Vector2d::Zero();
+    mast3r_last_pos_valid_ = false;
+    mast3r_forward_blocked_count_ = 0;
+    mast3r_path_replan_count_ = 0;
+    instance_stop_gate_enabled_ = false;
+    object_viewpoint_scan_target_valid_ = false;
+    object_viewpoint_scan_phase_ = 0;
+    object_viewpoint_scan_target_ = Eigen::Vector2d::Zero();
+    object_viewpoint_forward_blocked_count_ = 0;
+    object_viewpoint_alignment_steps_ = 0;
+    object_viewpoint_last_alignment_action_ = -1;
   }
   // FSM data
   bool trigger_, have_odom_, have_confidence_;
@@ -82,6 +108,34 @@ struct FSMData {
   std::vector<Eigen::Vector3d> stucking_points_;
 
   Eigen::Vector2d local_pos_;
+  bool mast3r_hint_active_;
+  bool mast3r_allow_stop_;
+  double mast3r_yaw_error_deg_;
+  double mast3r_forward_error_;
+  double mast3r_lateral_error_;
+  double mast3r_transl_error_;
+  double mast3r_depth_error_;
+  Eigen::Vector2d mast3r_target_pos_;
+  double mast3r_target_yaw_;
+  bool mast3r_goal_active_;
+  bool mast3r_path_active_;
+  Eigen::Vector2d mast3r_segment_target_pos_;
+  bool mast3r_segment_target_valid_;
+  int mast3r_segment_count_;
+  int mast3r_goal_age_;
+  Eigen::Vector2d mast3r_last_pos_;
+  bool mast3r_last_pos_valid_;
+  int mast3r_forward_blocked_count_;
+  int mast3r_path_replan_count_;
+  bool instance_stop_gate_enabled_;
+  // A locked DINO observation site gets a side-view frame and a re-aligned frame before
+  // the FSM is allowed to consume a precomputed fallback viewpoint.
+  bool object_viewpoint_scan_target_valid_;
+  int object_viewpoint_scan_phase_;
+  Eigen::Vector2d object_viewpoint_scan_target_;
+  int object_viewpoint_forward_blocked_count_;
+  int object_viewpoint_alignment_steps_;
+  int object_viewpoint_last_alignment_action_;
   LocalTrajectory newest_traj_;  // Store latest planned trajectory
 };
 
@@ -142,6 +196,36 @@ struct ExplorationParam {
   // params
   int policy_mode_;
   double sigma_threshold_, max_to_mean_threshold_, max_to_mean_percentage_;
+  bool object_viewpoint_enabled_;
+  double object_viewpoint_min_score_;
+  double object_viewpoint_standoff_near_;
+  double object_viewpoint_standoff_mid_;
+  double object_viewpoint_standoff_far_;
+  double object_viewpoint_standoff_extra_;
+  double object_viewpoint_reach_distance_;
+  double object_viewpoint_min_visible_ratio_;
+  double object_viewpoint_min_fov_deg_;
+  double object_viewpoint_max_fov_deg_;
+  double object_viewpoint_ideal_fov_deg_;
+  double object_viewpoint_fov_sigma_deg_;
+  double object_viewpoint_astar_time_;
+  double object_viewpoint_astar_budget_;
+  double object_viewpoint_min_path_length_;
+  double object_viewpoint_min_azimuth_sep_deg_;
+  double object_viewpoint_min_position_sep_;
+  double object_viewpoint_pre_path_distance_weight_;
+  double object_viewpoint_unknown_ray_penalty_;
+  double object_viewpoint_target_surface_clearance_;
+  int object_viewpoint_min_observations_;
+  int object_viewpoint_max_lock_steps_;
+  int object_viewpoint_direction_count_;
+  int object_viewpoint_visibility_samples_;
+  int object_viewpoint_max_astar_candidates_;
+  int object_viewpoint_max_views_;
+  int object_viewpoint_max_failed_inspections_;
+  int object_viewpoint_failure_cooldown_sequences_;
+  double object_viewpoint_retry_score_margin_;
+  double object_viewpoint_failure_spatial_radius_;
   std::string tsp_dir_;
 };
 

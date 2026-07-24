@@ -54,6 +54,7 @@ void SDFMap2D::initMap(ros::NodeHandle& nh)
   nh.param("sdf_map/p_max", mp_->p_max_, 0.97);
   nh.param("sdf_map/p_occ", mp_->p_occ_, 0.80);
   nh.param("sdf_map/max_ray_length", mp_->max_ray_length_, -0.1);
+  nh.param("sdf_map/ray_stop_dilation", mp_->ray_stop_dilation_, 0);
 
   // Check if using habitat simulator and override parameters if necessary
   bool is_real_world;
@@ -166,12 +167,16 @@ void SDFMap2D::inputObjectCloud2D(
   }
 }
 
-void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& points,
-    const Eigen::Vector3d& camera_pos, vector<Eigen::Vector2i>& free_grids)
+void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
+    const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
+    vector<Eigen::Vector2i>& free_grids, vector<Eigen::Vector2i>* semantic_free_grids)
 {
   free_grids.clear();
-  int point_num = points->points.size();
-  if (point_num == 0)
+  if (semantic_free_grids != nullptr)
+    semantic_free_grids->clear();
+  int occupied_point_num = occupied_points->points.size();
+  int raycast_point_num = raycast_points->points.size();
+  if (occupied_point_num == 0 && raycast_point_num == 0)
     return;
     
   // Initialize raycast tracking and clear occupancy updates
@@ -196,11 +201,33 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
   Eigen::Vector2i idx;
   int vox_adr;
   double length;
-  std::unordered_map<int, char> flag_occ, flag_free;
+  std::unordered_map<int, char> flag_occ, flag_occ_stop, flag_free;
+  std::unordered_map<int, char> flag_semantic_rayend, flag_semantic_free;
 
-  // First pass: Mark all occupied grids from depth points
-  for (int i = 0; i < point_num; ++i) {
-    auto& pt = points->points[i];
+  auto markRayStop = [&](const Eigen::Vector2i& stop_idx) {
+    int stop_adr = toAddress(stop_idx);
+    flag_occ_stop[stop_adr] = 1;
+
+    if (mp_->ray_stop_dilation_ <= 0)
+      return;
+
+    for (int dx = -mp_->ray_stop_dilation_; dx <= mp_->ray_stop_dilation_; ++dx) {
+      for (int dy = -mp_->ray_stop_dilation_; dy <= mp_->ray_stop_dilation_; ++dy) {
+        if (dx == 0 && dy == 0)
+          continue;
+        if (std::abs(dx) + std::abs(dy) > mp_->ray_stop_dilation_)
+          continue;
+        Eigen::Vector2i dilated_idx = stop_idx + Eigen::Vector2i(dx, dy);
+        if (!isInMap(dilated_idx))
+          continue;
+        flag_occ_stop[toAddress(dilated_idx)] = 1;
+      }
+    }
+  };
+
+  // First pass: Mark occupied grids only from obstacle-height depth points.
+  for (int i = 0; i < occupied_point_num; ++i) {
+    auto& pt = occupied_points->points[i];
     pt_w << pt.x, pt.y;
     int tmp_flag;
     
@@ -224,13 +251,74 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
     }
     posToIndex(pt_w, idx);
     vox_adr = toAddress(idx);
-    if (tmp_flag)
+    if (tmp_flag) {
       flag_occ[vox_adr] = 1;  // Mark as occupied in hash map
+      markRayStop(idx);
+    }
   }
 
-  // Second pass: Perform raycasting to mark free space, excluding occupied grids
-  for (int i = 0; i < point_num; ++i) {
-    auto& pt = points->points[i];
+  if (semantic_free_grids != nullptr) {
+    auto addSemanticFreeGrid = [&](const Eigen::Vector2i& free_idx) {
+      int adr = toAddress(free_idx);
+      if (!flag_semantic_free.count(adr)) {
+        flag_semantic_free[adr] = 1;
+        semantic_free_grids->push_back(free_idx);
+      }
+    };
+
+    for (int i = 0; i < occupied_point_num; ++i) {
+      auto& pt = occupied_points->points[i];
+      pt_w << pt.x, pt.y;
+
+      if (!isInMap(pt_w)) {
+        pt_w = closetPointInMap(pt_w, sensor_pos);
+        length = (pt_w - sensor_pos).norm();
+        if (length > mp_->max_ray_length_)
+          pt_w = (pt_w - sensor_pos) / length * mp_->max_ray_length_ + sensor_pos;
+      }
+      else {
+        length = (pt_w - sensor_pos).norm();
+        if (length > mp_->max_ray_length_)
+          pt_w = (pt_w - sensor_pos) / length * mp_->max_ray_length_ + sensor_pos;
+      }
+
+      posToIndex(pt_w, idx);
+      vox_adr = toAddress(idx);
+      if (flag_semantic_rayend[vox_adr])
+        continue;
+      flag_semantic_rayend[vox_adr] = 1;
+
+      if (mp_->ray_mode_ == 0) {
+        caster_->input(pt_w, sensor_pos);
+        caster_->nextId(idx);
+        addSemanticFreeGrid(idx);
+        while (caster_->nextId(idx)) {
+          int adr = toAddress(idx);
+          if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)
+            break;
+          if (md_->virtual_ground_buffer_[adr])
+            continue;
+          addSemanticFreeGrid(idx);
+        }
+        addSemanticFreeGrid(idx);
+      }
+      else {
+        caster_->input(sensor_pos, pt_w);
+        while (caster_->nextId(idx)) {
+          int adr = toAddress(idx);
+          if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)
+            break;
+          if (md_->virtual_ground_buffer_[adr])
+            break;
+          addSemanticFreeGrid(idx);
+        }
+      }
+    }
+  }
+
+  // Second pass: Use all valid depth endpoints to clear free space.
+  for (int i = 0; i < raycast_point_num; ++i) {
+    auto& pt = raycast_points->points[i];
     pt_w << pt.x, pt.y;
     int tmp_flag;
     
@@ -254,8 +342,8 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
     }
     posToIndex(pt_w, idx);
     vox_adr = toAddress(idx);
-    if (tmp_flag == 1)
-      setCacheOccupancy(vox_adr, tmp_flag);
+    if (tmp_flag == 1 && flag_occ.count(vox_adr) && flag_occ[vox_adr] == 1)
+      setCacheOccupancy(vox_adr, 1);
 
     // Update the bounding box of affected area
     for (int k = 0; k < 2; ++k) {
@@ -281,8 +369,8 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
       }
       while (caster_->nextId(idx)) {
         int adr = toAddress(idx);
-        if (flag_occ.count(adr) && flag_occ[adr] == 1)  // Skip if marked as occupied
-          continue;
+        if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)
+          break;
         if (md_->virtual_ground_buffer_[adr])  // Skip virtual ground
           continue;
         setCacheOccupancy(adr, 0);
@@ -302,8 +390,16 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& point
       caster_->input(sensor_pos, pt_w);
       while (caster_->nextId(idx)) {
         int adr = toAddress(idx);
-        if (flag_occ.count(adr) && flag_occ[adr] == 1)  // Stop if hit occupied grid
+        if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1) {
+          if (flag_occ.count(adr) && flag_occ[adr] == 1)
+            break;
+          setCacheOccupancy(adr, 0);
+          if (!flag_free.count(adr)) {
+            flag_free[adr] = 1;
+            free_grids.push_back(idx);
+          }
           break;
+        }
         if (md_->virtual_ground_buffer_[adr])  // Stop at virtual ground
           break;
         setCacheOccupancy(adr, 0);

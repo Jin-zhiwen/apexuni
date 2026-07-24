@@ -41,6 +41,7 @@
         <param name="sdf_map/p_max" value="0.98"/>
         <param name="sdf_map/p_occ" value="0.80"/>
         <param name="sdf_map/max_ray_length" value="4.99"/>
+        <param name="sdf_map/ray_stop_dilation" value="1"/>
         <param name="sdf_map/optimistic" value="false" type="bool"/>
         <param name="sdf_map/signed_dist" value="false" type="bool"/>
 
@@ -57,6 +58,17 @@
         <param name="map_ros/skip_pixel" value="1"/>
         <param name="map_ros/frame_id" value="world"/>
         <param name="map_ros/virtual_ground_height" value="-0.34"/>
+        <param name="semantic/use_raycast_free_grids" value="true" type="bool"/>
+        <param name="semantic/object_evidence_enabled" value="true" type="bool"/>
+        <param name="semantic/visual_free_space_floor" value="0.06" type="double"/>
+        <param name="semantic/visual_raw_min" value="0.02" type="double"/>
+        <!-- The weighted full-frame base is normally 0.09-0.36. Stretch that
+             range for RViz without changing the values used by the planner. -->
+        <param name="semantic/visual_raw_max" value="0.40" type="double"/>
+        <param name="semantic/object_update_radius" value="0.18" type="double"/>
+        <param name="semantic/object_evidence_weight" value="0.70" type="double"/>
+        <param name="semantic/object_evidence_decay_tau" value="3.00" type="double"/>
+        <param name="detector/cloud_max_age" value="0.80" type="double"/>
 
         <param name="fsm/replan_time" value="0.30" type="double"/>
         <param name="fsm/replan_traj_end_threshold" value="1.0" type="double"/>

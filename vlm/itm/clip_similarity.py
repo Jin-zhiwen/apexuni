@@ -19,6 +19,7 @@ class CLIPSimilarity:
         self.model, self.preprocess = clip.load(model_name, device=self.device)
         self.model.eval()
         self.goal_feature: Optional[torch.Tensor] = None
+        self.goal_clean_crop_feature: Optional[torch.Tensor] = None
 
     @staticmethod
     def _to_pil_rgb(image: np.ndarray) -> Image.Image:
@@ -35,13 +36,34 @@ class CLIPSimilarity:
 
     def set_goal_image(self, goal_image: np.ndarray) -> None:
         self.goal_feature = self._encode_image(goal_image)
+        # A new full goal starts a new matching context; do not retain an old crop.
+        self.goal_clean_crop_feature = None
 
     def set_goal_clean_crop(self, goal_clean_crop: np.ndarray) -> None:
-        self.goal_feature = self._encode_image(goal_clean_crop)
+        self.goal_clean_crop_feature = self._encode_image(goal_clean_crop)
+
+    def _cosine_with_goal_feature(
+        self,
+        rgb_image: np.ndarray,
+        goal_feature: Optional[torch.Tensor],
+        missing_goal_message: str,
+    ) -> float:
+        if goal_feature is None:
+            raise ValueError(missing_goal_message)
+        cur_feature = self._encode_image(rgb_image)
+        score = torch.matmul(cur_feature, goal_feature.T).item()
+        return float(score)
 
     def cosine(self, rgb_image: np.ndarray) -> float:
-        if self.goal_feature is None:
-            raise ValueError("Goal image is not set. Call set_goal_image() first.")
-        cur_feature = self._encode_image(rgb_image)
-        score = torch.matmul(cur_feature, self.goal_feature.T).item()
-        return float(score)
+        return self._cosine_with_goal_feature(
+            rgb_image,
+            self.goal_feature,
+            "Goal image is not set. Call set_goal_image() first.",
+        )
+
+    def cosine_clean_crop(self, rgb_crop: np.ndarray) -> float:
+        return self._cosine_with_goal_feature(
+            rgb_crop,
+            self.goal_clean_crop_feature,
+            "Goal clean crop is not set. Call set_goal_clean_crop() first.",
+        )

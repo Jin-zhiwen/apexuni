@@ -11,6 +11,9 @@
  */
 
 #include <plan_env/object_map2d.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace apexnav_planner {
 ObjectMap2D::ObjectMap2D(SDFMap2D* sdf_map, ros::NodeHandle& nh)
@@ -31,6 +34,9 @@ ObjectMap2D::ObjectMap2D(SDFMap2D* sdf_map, ros::NodeHandle& nh)
   nh.param("object/fusion_type", fusion_type_, 1);
   nh.param("object/use_observation", use_observation_, true);
   nh.param("object/vis_cloud", is_vis_cloud_, false);
+  nh.param("object/semantic_gate_enabled", semantic_gate_enabled_, false);
+  nh.param("object/semantic_gate_threshold", semantic_gate_threshold_, 0.45);
+  instance_reject_radius_ = 0.75;
 
   // Setup ROS communication
   object_cloud_pub_ = nh.advertise<sensor_msgs::PointCloud2>("/object/clouds", 10);
@@ -50,6 +56,81 @@ void ObjectMap2D::setConfidenceThreshold(double val)
 {
   min_confidence_ = val;
   ROS_INFO("Set Confidence Threshold = %f", val);
+}
+
+void ObjectMap2D::setSemanticGate(bool enabled, double threshold)
+{
+  semantic_gate_enabled_ = enabled;
+  semantic_gate_threshold_ = threshold;
+  ROS_INFO("[ObjectMap2D] semantic gate enabled=%d threshold=%.3f",
+      semantic_gate_enabled_ ? 1 : 0, semantic_gate_threshold_);
+}
+
+bool ObjectMap2D::isSemanticGateEnabled() const
+{
+  return semantic_gate_enabled_;
+}
+
+void ObjectMap2D::rejectInstanceCandidate(const Eigen::Vector2d& pos, double radius)
+{
+  rejected_instance_candidates_.push_back(pos);
+  instance_reject_radius_ = std::max(radius, resolution_);
+  ROS_WARN("[ObjectMap2D] reject instance candidate near (%.3f, %.3f), radius=%.2f",
+      pos(0), pos(1), instance_reject_radius_);
+}
+
+void ObjectMap2D::rejectSemanticObjectCandidate(int object_id)
+{
+  if (object_id < 0 ||
+      std::find(rejected_semantic_candidate_ids_.begin(),
+          rejected_semantic_candidate_ids_.end(), object_id) !=
+          rejected_semantic_candidate_ids_.end())
+    return;
+
+  rejected_semantic_candidate_ids_.push_back(object_id);
+  ROS_WARN("[ObjectMap2D] reject semantic viewpoint candidate id=%d", object_id);
+}
+
+void ObjectMap2D::getSemanticObjectCandidates(
+    vector<SemanticObjectCandidate>& candidates) const
+{
+  candidates.clear();
+
+  for (const auto& object : objects_) {
+    if (isInstanceRejected(object))
+      continue;
+
+    for (int label = 0; label < (int)object.clouds_.size(); ++label) {
+      const auto& cloud = object.clouds_[label];
+      if (cloud == nullptr || cloud->points.empty() ||
+          label >= (int)object.semantic_recent_scores_.size())
+        continue;
+
+      const double semantic_score = object.semantic_recent_scores_[label];
+      if (!std::isfinite(semantic_score) || semantic_score < 0.0)
+        continue;
+
+      SemanticObjectCandidate candidate;
+      candidate.object_id = object.id_;
+      candidate.label = label;
+      candidate.observation_count = object.semantic_high_score_streaks_[label];
+      candidate.evidence_epoch = object.semantic_evidence_epochs_[label];
+      candidate.semantic_score = semantic_score;
+      candidate.detector_score = object.confidence_scores_[label];
+      candidate.center = object.average_;
+      candidate.cloud = cloud;
+      candidates.push_back(candidate);
+    }
+  }
+
+  std::sort(candidates.begin(), candidates.end(),
+      [](const SemanticObjectCandidate& a, const SemanticObjectCandidate& b) {
+        if (std::abs(a.semantic_score - b.semantic_score) > 1e-6)
+          return a.semantic_score > b.semantic_score;
+        if (a.observation_count != b.observation_count)
+          return a.observation_count > b.observation_count;
+        return a.detector_score > b.detector_score;
+      });
 }
 
 /**
@@ -142,6 +223,8 @@ int ObjectMap2D::searchSingleObjectCluster(const DetectedObject& detected_object
     Eigen::Vector2i idx;
     Eigen::Vector2d pt_w;
     pt_w << object_cloud->points[i].x, object_cloud->points[i].y;
+    if (!sdf_map_->isInMap(pt_w))
+      continue;
     sdf_map_->posToIndex(pt_w, idx);
     int adr = sdf_map_->toAddress(idx);
 
@@ -174,6 +257,8 @@ int ObjectMap2D::searchSingleObjectCluster(const DetectedObject& detected_object
 
     // Check neighbors for existing object associations
     for (auto nbr : nbrs) {
+      if (!sdf_map_->isInMap(nbr))
+        continue;
       int nbr_adr = sdf_map_->toAddress(nbr);
       if (object_indexs_[nbr_adr] != -1) {
         // Found existing object cluster - use first match
@@ -295,6 +380,8 @@ void ObjectMap2D::createNewObjectCluster(
 
   // Initialize confidence tracking for this object
   obj.confidence_scores_[label] = detected_object.score;
+  obj.semantic_scores_[label] = detected_object.semantic_score;
+  obj.semantic_observation_nums_[label] = detected_object.semantic_score >= 0.0 ? 1 : 0;
   obj.observation_cloud_sums_[label] = detected_object.cloud->points.size();
   obj.observation_nums_[label] = 1;
 
@@ -373,6 +460,9 @@ void ObjectMap2D::mergeCellsIntoObjectCluster(const int& merged_object_id,
     merged_object.clouds_[label].reset(new pcl::PointCloud<pcl::PointXYZ>());
     *merged_object.clouds_[label] = *(detected_object.cloud);
     merged_object.confidence_scores_[label] = detected_object.score;
+    merged_object.semantic_scores_[label] = detected_object.semantic_score;
+    merged_object.semantic_observation_nums_[label] =
+        detected_object.semantic_score >= 0.0 ? 1 : 0;
     merged_object.observation_cloud_sums_[label] = detected_object.cloud->points.size();
     merged_object.observation_nums_[label] = 1;
     printFusionInfo(merged_object, label, "[New Label Merged]");
@@ -411,6 +501,9 @@ void ObjectMap2D::mergeCellsIntoObjectCluster(const int& merged_object_id,
     // Prepare confidence fusion parameters
     int last_total = last_objects[merged_object_id].clouds_[label]->points.size();
     double last_total_confidence = last_objects[merged_object_id].confidence_scores_[label];
+    double last_semantic_score = last_objects[merged_object_id].semantic_scores_[label];
+    int last_semantic_observation_num =
+        last_objects[merged_object_id].semantic_observation_nums_[label];
     int now_observation = detected_object.cloud->points.size();
     double now_confidence = detected_object.score;
     int now_total = merged_object.clouds_[label]->points.size();
@@ -425,6 +518,11 @@ void ObjectMap2D::mergeCellsIntoObjectCluster(const int& merged_object_id,
     else if (fusion_type_ == 2)
       merged_object.confidence_scores_[label] =
           max(merged_object.confidence_scores_[label], now_confidence);  // Maximum confidence
+    merged_object.semantic_scores_[label] =
+        fuseSemanticScore(
+            last_semantic_score, last_semantic_observation_num, detected_object.semantic_score);
+    if (detected_object.semantic_score >= 0.0)
+      merged_object.semantic_observation_nums_[label] = last_semantic_observation_num + 1;
     printFusionInfo(merged_object, label, "[Fusion]");
   }
 }
@@ -454,6 +552,156 @@ double ObjectMap2D::fusionConfidenceScore(
   w_now = n_now / sum;                            // Weight for current observation
   final_score = w_last * c_last + w_now * c_now;  // Weighted combination
   return final_score;
+}
+
+double ObjectMap2D::fuseSemanticScore(double last_score, int last_obs, double now_score) const
+{
+  if (now_score < 0.0)
+    return last_score;
+  if (last_score < 0.0 || last_obs <= 0)
+    return now_score;
+
+  const double last_weight = static_cast<double>(last_obs);
+  return (last_score * last_weight + now_score) / (last_weight + 1.0);
+}
+
+int ObjectMap2D::searchSemanticObjectCluster(const DetectedObject& semantic_object)
+{
+  if (semantic_object.cloud == nullptr || semantic_object.cloud->points.empty())
+    return -1;
+
+  Vector2d semantic_center(0.0, 0.0);
+  int valid_points = 0;
+  for (const auto& pt : semantic_object.cloud->points) {
+    Vector2d pt2d(pt.x, pt.y);
+    if (!sdf_map_->isInMap(pt2d))
+      continue;
+    semantic_center += pt2d;
+    ++valid_points;
+  }
+  if (valid_points <= 0)
+    return -1;
+  semantic_center /= static_cast<double>(valid_points);
+
+  int best_obj_idx = -1;
+  double best_dist = std::numeric_limits<double>::infinity();
+  for (int obj_idx = 0; obj_idx < (int)objects_.size(); ++obj_idx) {
+    const ObjectCluster& object = objects_[obj_idx];
+    if (semantic_object.label >= 0 && semantic_object.label < (int)object.clouds_.size() &&
+        object.clouds_[semantic_object.label] == nullptr)
+      continue;
+
+    const bool inside_box =
+        semantic_center[0] >= object.box_min2d_[0] - resolution_ &&
+        semantic_center[0] <= object.box_max2d_[0] + resolution_ &&
+        semantic_center[1] >= object.box_min2d_[1] - resolution_ &&
+        semantic_center[1] <= object.box_max2d_[1] + resolution_;
+    const double dist = (semantic_center - object.average_).norm();
+    if ((inside_box || dist <= 0.6) && dist < best_dist) {
+      best_dist = dist;
+      best_obj_idx = obj_idx;
+    }
+  }
+  return best_obj_idx;
+}
+
+void ObjectMap2D::inputSemanticObjectClouds(const vector<DetectedObject>& semantic_objects)
+{
+  const unsigned long next_sequence = semantic_input_debug_.sequence + 1;
+  semantic_input_debug_ = SemanticInputDebugInfo();
+  semantic_input_debug_.sequence = next_sequence;
+  semantic_input_debug_.received_clouds = semantic_objects.size();
+  semantic_input_debug_.gate_threshold = semantic_gate_threshold_;
+
+  vector<pair<int, int>> seen_labels;
+  for (const auto& semantic_object : semantic_objects) {
+    if (semantic_object.label < 0 || semantic_object.semantic_score < 0.0) {
+      ++semantic_input_debug_.invalid_label_clouds;
+      continue;
+    }
+
+    ++semantic_input_debug_.valid_clouds;
+
+    const int object_id = searchSemanticObjectCluster(semantic_object);
+    if (object_id < 0) {
+      ++semantic_input_debug_.unmatched_clouds;
+      continue;
+    }
+
+    ObjectCluster& object = objects_[object_id];
+    if (semantic_object.label >= (int)object.semantic_scores_.size()) {
+      ++semantic_input_debug_.invalid_label_clouds;
+      continue;
+    }
+
+    ++semantic_input_debug_.matched_clouds;
+
+    const pair<int, int> object_label(object_id, semantic_object.label);
+    const bool first_in_frame =
+        std::find(seen_labels.begin(), seen_labels.end(), object_label) == seen_labels.end();
+    if (first_in_frame) {
+      seen_labels.push_back(object_label);
+      if (semantic_object.semantic_score >= semantic_gate_threshold_) {
+        ++semantic_input_debug_.above_gate_pairs;
+        const int previous_streak =
+            object.semantic_high_score_streaks_[semantic_object.label];
+        const int current_streak = previous_streak + 1;
+        const double previous_high =
+            object.semantic_previous_high_scores_[semantic_object.label];
+        if (previous_streak == 0)
+          ++object.semantic_evidence_epochs_[semantic_object.label];
+
+        // Keep the active-inspection trigger local to the latest two valid observations. A
+        // cumulative streak mean lets an old high score keep a now-weak object attractive.
+        object.semantic_recent_scores_[semantic_object.label] =
+            previous_streak >= 1 && previous_high >= semantic_gate_threshold_
+            ? 0.5 * (previous_high + semantic_object.semantic_score)
+            : -1.0;
+        object.semantic_previous_high_scores_[semantic_object.label] = semantic_object.semantic_score;
+        object.semantic_high_score_streaks_[semantic_object.label] = current_streak;
+        if (current_streak >= 2)
+          ++semantic_input_debug_.stable_pairs;
+      }
+      else {
+        object.semantic_high_score_streaks_[semantic_object.label] = 0;
+        object.semantic_recent_scores_[semantic_object.label] = -1.0;
+        object.semantic_previous_high_scores_[semantic_object.label] = -1.0;
+      }
+    }
+
+    const int obs_num = object.semantic_observation_nums_[semantic_object.label];
+    object.semantic_scores_[semantic_object.label] = fuseSemanticScore(
+        object.semantic_scores_[semantic_object.label], obs_num, semantic_object.semantic_score);
+    object.semantic_observation_nums_[semantic_object.label] = obs_num + 1;
+    ROS_INFO_THROTTLE(1.0,
+        "[ObjectMap2D] semantic score update id=%d label=%d dino=%.3f fused=%.3f "
+        "recent=%.3f streak=%d",
+        object_id, semantic_object.label, semantic_object.semantic_score,
+        object.semantic_scores_[semantic_object.label],
+        object.semantic_recent_scores_[semantic_object.label],
+        object.semantic_high_score_streaks_[semantic_object.label]);
+
+    if (semantic_object.semantic_score > semantic_input_debug_.best_score) {
+      semantic_input_debug_.best_object_id = object.id_;
+      semantic_input_debug_.best_label = semantic_object.label;
+      semantic_input_debug_.best_streak =
+          object.semantic_high_score_streaks_[semantic_object.label];
+      semantic_input_debug_.best_score = semantic_object.semantic_score;
+      semantic_input_debug_.best_recent_score =
+          object.semantic_recent_scores_[semantic_object.label];
+    }
+  }
+
+  for (auto& object : objects_) {
+    for (int label = 0; label < (int)object.semantic_high_score_streaks_.size(); ++label) {
+      if (std::find(seen_labels.begin(), seen_labels.end(), pair<int, int>(object.id_, label)) ==
+          seen_labels.end()) {
+          object.semantic_high_score_streaks_[label] = 0;
+          object.semantic_recent_scores_[label] = -1.0;
+          object.semantic_previous_high_scores_[label] = -1.0;
+      }
+    }
+  }
 }
 
 bool ObjectMap2D::checkSafety(const Eigen::Vector2i& idx)
@@ -544,12 +792,20 @@ void ObjectMap2D::getTopConfidenceObjectCloud(
   // TODO: May need logic adjustment for relaxed no limited_confidence conditions
   if (!limited_confidence) {
     // Include all objects without confidence filtering
-    for (auto object : objects_) top_objects.push_back(object);
+    for (auto object : objects_) {
+      if (!passSemanticGate(object) || isInstanceRejected(object))
+        continue;
+      top_objects.push_back(object);
+    }
 
     // Sort by confidence score in descending order
     std::sort(
         top_objects.begin(), top_objects.end(), [](const ObjectCluster& a, const ObjectCluster& b) {
-          return a.confidence_scores_[0] > b.confidence_scores_[0];
+          const double a_sem = std::max(0.0, a.semantic_scores_[0]);
+          const double b_sem = std::max(0.0, b.semantic_scores_[0]);
+          const double a_rank = a.confidence_scores_[0] * (1.0 + a_sem);
+          const double b_rank = b.confidence_scores_[0] * (1.0 + b_sem);
+          return a_rank > b_rank;
         });
 
     // Extract point clouds for top-ranked objects
@@ -577,6 +833,8 @@ void ObjectMap2D::getTopConfidenceObjectCloud(
 
       // Include all object cells regardless of confidence
       for (auto object : objects_) {
+        if (!passSemanticGate(object) || isInstanceRejected(object))
+          continue;
         for (auto cell : object.cells_) {
           pcl::PointXYZ point;
           point.x = cell(0);
@@ -605,14 +863,19 @@ void ObjectMap2D::getTopConfidenceObjectCloud(
       }
 
       // Include only high-confidence objects with primary label (0)
-      if (best_label == 0 && isConfidenceObject(object))
+      if (best_label == 0 && isConfidenceObject(object) && passSemanticGate(object) &&
+          !isInstanceRejected(object))
         top_objects.push_back(object);
     }
 
     // Sort filtered objects by confidence
     std::sort(
         top_objects.begin(), top_objects.end(), [](const ObjectCluster& a, const ObjectCluster& b) {
-          return a.confidence_scores_[0] > b.confidence_scores_[0];
+          const double a_sem = std::max(0.0, a.semantic_scores_[0]);
+          const double b_sem = std::max(0.0, b.semantic_scores_[0]);
+          const double a_rank = a.confidence_scores_[0] * (1.0 + a_sem);
+          const double b_rank = b.confidence_scores_[0] * (1.0 + b_sem);
+          return a_rank > b_rank;
         });
 
     // Extract point clouds from filtered objects
@@ -636,6 +899,29 @@ bool ObjectMap2D::isConfidenceObject(const ObjectCluster& obj)
   if (obj.confidence_scores_[0] >= min_confidence_ &&
       obj.observation_nums_[0] >= min_observation_num_)
     return true;
+  return false;
+}
+
+bool ObjectMap2D::passSemanticGate(const ObjectCluster& obj) const
+{
+  if (!semantic_gate_enabled_)
+    return true;
+  if (obj.semantic_scores_.empty())
+    return false;
+  return obj.semantic_scores_[0] >= semantic_gate_threshold_;
+}
+
+bool ObjectMap2D::isInstanceRejected(const ObjectCluster& obj) const
+{
+  if (std::find(rejected_semantic_candidate_ids_.begin(),
+          rejected_semantic_candidate_ids_.end(), obj.id_) !=
+      rejected_semantic_candidate_ids_.end())
+    return true;
+
+  for (const auto& rejected_pos : rejected_instance_candidates_) {
+    if ((obj.average_ - rejected_pos).norm() <= instance_reject_radius_)
+      return true;
+  }
   return false;
 }
 

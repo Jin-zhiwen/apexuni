@@ -29,6 +29,8 @@ void Astar2D::init(ros::NodeHandle& nh, const SDFMap2D::Ptr& sdf_map)
   use_node_num_ = 0;
   iter_num_ = 0;
   early_terminate_cost_ = 0.0;
+  last_search_termination_ = SEARCH_NOT_RUN;
+  last_search_duration_ = 0.0;
 }
 
 void Astar2D::reset()
@@ -44,6 +46,9 @@ void Astar2D::reset()
   }
   use_node_num_ = 0;
   iter_num_ = 0;
+  early_terminate_cost_ = 0.0;
+  last_search_termination_ = SEARCH_NOT_RUN;
+  last_search_duration_ = 0.0;
 }
 
 void Astar2D::setResolution(const double& res)
@@ -54,6 +59,12 @@ void Astar2D::setResolution(const double& res)
 
 int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d& end_pt,
     double success_dist, double max_time, int safety_mode)
+{
+  return astarSearch(start_pt, end_pt, success_dist, max_time, safety_mode, true);
+}
+
+int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d& end_pt,
+    double success_dist, double max_time, int safety_mode, bool relax_near_start_safety)
 {
   Node2DPtr cur_node = path_node_pool_[0];
   cur_node->parent = nullptr;
@@ -70,6 +81,11 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
   use_node_num_ += 1;
 
   const auto t1 = ros::Time::now();
+  auto finish_search = [&](int result, int termination) {
+    last_search_duration_ = (ros::Time::now() - t1).toSec();
+    last_search_termination_ = termination;
+    return result;
+  };
 
   /* ---------- search loop ---------- */
   while (!open_set_.empty()) {
@@ -80,14 +96,14 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
       reach_end = true;
     if (reach_end) {
       backtrack(cur_node, end_pt);
-      return REACH_END;
+      return finish_search(REACH_END, SEARCH_REACHED_END);
     }
 
     // Early termination if time up
     if ((ros::Time::now() - t1).toSec() > max_time) {
       early_terminate_cost_ = cur_node->g_score + getDiagHeu(cur_node->position, end_pt);
       // ROS_WARN("Astar Long Time");
-      return NO_PATH;
+      return finish_search(NO_PATH, SEARCH_TIME_LIMIT);
     }
 
     open_set_.pop();
@@ -102,8 +118,11 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
     for (auto step : steps) {
       nbr_pos = cur_pos + step;
 
-      // Skip safety raycast if still near start to avoid immediate termination
-      if ((nbr_pos - start_pt).norm() > 0.25) {
+      // Most exploration callers may escape an initially inflated start cell. A locked
+      // MASt3R target disables this relaxation so its first physical step is checked too.
+      const bool relax_safety =
+          relax_near_start_safety && (nbr_pos - start_pt).norm() <= 0.25 + 1e-6;
+      if (!relax_safety) {
         // Check safety
         if (!checkPointSafety(nbr_pos, safety_mode))
           continue;
@@ -137,7 +156,7 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
         use_node_num_ += 1;
         if (use_node_num_ == allocate_num_) {
           cout << "run out of node pool." << endl;
-          return NO_PATH;
+          return finish_search(NO_PATH, SEARCH_NODE_POOL_EXHAUSTED);
         }
         neighbor->index = nbr_idx;
         neighbor->position = nbr_pos;
@@ -155,7 +174,7 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
       open_set_map_[nbr_idx] = neighbor;
     }
   }
-  return NO_PATH;
+  return finish_search(NO_PATH, SEARCH_OPEN_SET_EMPTY);
 }
 
 std::vector<Eigen::Vector2d> Astar2D::generateSteps(Eigen::Vector2d pos)
@@ -238,6 +257,43 @@ void Astar2D::posToIndex(const Eigen::Vector2d& pt, Eigen::Vector2i& idx)
 std::vector<Eigen::Vector2d> Astar2D::getPath()
 {
   return path_nodes_;
+}
+
+int Astar2D::getLastSearchTermination() const
+{
+  return last_search_termination_;
+}
+
+const char* Astar2D::getLastSearchTerminationName() const
+{
+  switch (last_search_termination_) {
+    case SEARCH_REACHED_END:
+      return "reached_end";
+    case SEARCH_TIME_LIMIT:
+      return "time_limit";
+    case SEARCH_OPEN_SET_EMPTY:
+      return "open_set_empty";
+    case SEARCH_NODE_POOL_EXHAUSTED:
+      return "node_pool_exhausted";
+    case SEARCH_NOT_RUN:
+    default:
+      return "not_run";
+  }
+}
+
+int Astar2D::getLastUsedNodeNum() const
+{
+  return use_node_num_;
+}
+
+int Astar2D::getLastIterationNum() const
+{
+  return iter_num_;
+}
+
+double Astar2D::getLastSearchDuration() const
+{
+  return last_search_duration_;
 }
 
 double Astar2D::pathLength(const vector<Eigen::Vector2d>& path)

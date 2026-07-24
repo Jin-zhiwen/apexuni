@@ -33,6 +33,12 @@ dependencies = [
     "openai>=1.58.1",
     "clip @ git+https://github.com/openai/CLIP.git",
     "lightglue @ git+https://github.com/cvg/LightGlue.git",
+    "scikit-learn",
+    "roma",
+    "einops",
+    "trimesh",
+    "pyglet<2",
+    "huggingface-hub[torch]>=0.22",
     "habitat2ros @ file:./habitat2ros",
     "ollama",
 ]

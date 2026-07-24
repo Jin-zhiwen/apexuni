@@ -13,6 +13,12 @@
     <arg name="filter_min_height_" default="0.28"/>
     <arg name="filter_max_height_" default="1.18"/>
     <arg name="object_process_min_pitch_" default="1.5"/>
+    <arg name="semantic_gate_enabled_" default="true"/>
+    <arg name="semantic_gate_threshold_" default="0.45"/>
+    <arg name="object_viewpoint_max_failed_inspections_" default="2"/>
+    <arg name="object_viewpoint_failure_cooldown_sequences_" default="30"/>
+    <arg name="object_viewpoint_retry_score_margin_" default="0.05"/>
+    <arg name="object_viewpoint_failure_spatial_radius_" default="0.75"/>
 
     <!-- Real-world mode flag (default to false for simulation) -->
     <arg name="is_real_world_" default="false"/>
@@ -44,6 +50,7 @@
         <param name="sdf_map/p_max" value="0.98"/>
         <param name="sdf_map/p_occ" value="0.80"/>
         <param name="sdf_map/max_ray_length" value="4.99"/>
+        <param name="sdf_map/ray_stop_dilation" value="1"/>
         <param name="sdf_map/optimistic" value="false" type="bool"/>
         <param name="sdf_map/signed_dist" value="false" type="bool"/>
 
@@ -61,6 +68,17 @@
         <param name="map_ros/skip_pixel" value="1"/>
         <param name="map_ros/frame_id" value="world"/>
         <param name="map_ros/virtual_ground_height" value="-0.34"/>
+        <param name="semantic/use_raycast_free_grids" value="true" type="bool"/>
+        <param name="semantic/object_evidence_enabled" value="true" type="bool"/>
+        <param name="semantic/visual_free_space_floor" value="0.06" type="double"/>
+        <param name="semantic/visual_raw_min" value="0.02" type="double"/>
+        <!-- The weighted full-frame base is normally 0.09-0.36. Stretch that
+             range for RViz without changing the values used by the planner. -->
+        <param name="semantic/visual_raw_max" value="0.40" type="double"/>
+        <param name="semantic/object_update_radius" value="0.18" type="double"/>
+        <param name="semantic/object_evidence_weight" value="0.70" type="double"/>
+        <param name="semantic/object_evidence_decay_tau" value="3.00" type="double"/>
+        <param name="detector/cloud_max_age" value="0.80" type="double"/>
 
         <!-- Exploration manager -->
         <!-- 0: distance 1: semantic 2: hybrid(TSP sem + closest dist) 3: TSP(distance) -->
@@ -69,6 +87,51 @@
         <param name="exploration/max_to_mean_threshold" value="1.10" type="double"/>
         <param name="exploration/max_to_mean_percentage" value="0.90" type="double"/>
         <param name="exploration/tsp_dir" value="$(find lkh_mtsp_solver)/resource" type="string"/>
+        <!-- A stable DINO crop creates one finite inspection task independently of frontier
+             score. It precomputes distinct safe viewpoints around the object, but exposes only
+             one fixed target at a time; LightGlue/MASt3R can temporarily preempt it. -->
+        <param name="exploration/object_viewpoint/enabled" value="true" type="bool"/>
+        <param name="exploration/object_viewpoint/min_score" value="0.50" type="double"/>
+        <param name="exploration/object_viewpoint/standoff_near" value="1.40" type="double"/>
+        <param name="exploration/object_viewpoint/standoff_mid" value="1.70" type="double"/>
+        <param name="exploration/object_viewpoint/standoff_far" value="2.00" type="double"/>
+        <param name="exploration/object_viewpoint/standoff_extra" value="2.30" type="double"/>
+        <param name="exploration/object_viewpoint/reach_distance" value="0.25" type="double"/>
+        <param name="exploration/object_viewpoint/min_observations" value="2" type="int"/>
+        <param name="exploration/object_viewpoint/max_lock_steps" value="60" type="int"/>
+        <param name="exploration/object_viewpoint/max_views" value="3" type="int"/>
+        <!-- A completed multi-view inspection without LightGlue confirmation is negative
+             evidence. Retry the same spatial candidate only within a finite episode budget;
+             materially stronger DINO evidence may reopen an exhausted candidate. Set the
+             score margin to 0 to disable stronger-evidence reopening. -->
+        <param name="exploration/object_viewpoint/max_failed_inspections"
+               value="$(arg object_viewpoint_max_failed_inspections_)" type="int"/>
+        <param name="exploration/object_viewpoint/failure_cooldown_sequences"
+               value="$(arg object_viewpoint_failure_cooldown_sequences_)" type="int"/>
+        <param name="exploration/object_viewpoint/retry_score_margin"
+               value="$(arg object_viewpoint_retry_score_margin_)" type="double"/>
+        <param name="exploration/object_viewpoint/failure_spatial_radius"
+               value="$(arg object_viewpoint_failure_spatial_radius_)" type="double"/>
+        <param name="exploration/object_viewpoint/min_azimuth_sep_deg" value="60.0" type="double"/>
+        <param name="exploration/object_viewpoint/min_position_sep" value="0.70" type="double"/>
+        <param name="exploration/object_viewpoint/direction_count" value="16" type="int"/>
+        <param name="exploration/object_viewpoint/visibility_samples" value="32" type="int"/>
+        <param name="exploration/object_viewpoint/min_visible_ratio" value="0.55" type="double"/>
+        <param name="exploration/object_viewpoint/min_fov_deg" value="25.0" type="double"/>
+        <param name="exploration/object_viewpoint/max_fov_deg" value="65.0" type="double"/>
+        <param name="exploration/object_viewpoint/ideal_fov_deg" value="48.0" type="double"/>
+        <param name="exploration/object_viewpoint/fov_sigma_deg" value="15.0" type="double"/>
+        <param name="exploration/object_viewpoint/max_astar_candidates" value="16" type="int"/>
+        <param name="exploration/object_viewpoint/astar_time" value="0.03" type="double"/>
+        <param name="exploration/object_viewpoint/astar_budget" value="0.15" type="double"/>
+        <param name="exploration/object_viewpoint/min_path_length" value="0.30" type="double"/>
+        <param name="exploration/object_viewpoint/pre_path_distance_weight" value="0.10" type="double"/>
+        <!-- Unknown cells on a sight ray are weak evidence, not a collision claim. Known
+             occupied/inflated cells still reject the viewpoint. -->
+        <param name="exploration/object_viewpoint/unknown_ray_penalty" value="0.35" type="double"/>
+        <!-- Ignore the target object's own occupied/inflated shell near the sampled front face;
+             obstacles farther before that face still block visibility. -->
+        <param name="exploration/object_viewpoint/target_surface_clearance" value="0.40" type="double"/>
 
         <param name="frontier/cluster_min" value="2" type="int"/>
         <param name="frontier/cluster_size_xy" value="0.65" type="double"/>
@@ -79,6 +142,8 @@
         <!-- 0: no_fusion 1: ours_fusion 2: max_fusion-->
         <param name="object/fusion_type" value="1" type="int"/>
         <param name="object/use_observation" value="true" type="bool"/>
+        <param name="object/semantic_gate_enabled" value="$(arg semantic_gate_enabled_)" type="bool"/>
+        <param name="object/semantic_gate_threshold" value="$(arg semantic_gate_threshold_)" type="double"/>
         <param name="object/vis_cloud" value="true" type="bool"/>
 
         <!-- Perception utils -->

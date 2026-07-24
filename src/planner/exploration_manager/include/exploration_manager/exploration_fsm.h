@@ -15,8 +15,11 @@
 // ROS message types
 #include <geometry_msgs/PoseStamped.h>
 #include <nav_msgs/Odometry.h>
+#include <plan_env/MultipleMasksWithConfidence.h>
 #include <std_msgs/Float64.h>
 #include <std_msgs/Int32.h>
+#include <std_msgs/Float32MultiArray.h>
+#include <std_msgs/String.h>
 #include <visualization_msgs/Marker.h>
 
 using Eigen::Vector2d;
@@ -37,6 +40,9 @@ constexpr double FRONTIER_TIMER_DURATION = 0.25;
 // Robot Action
 constexpr double ACTION_DISTANCE = 0.25;
 constexpr double ACTION_ANGLE = M_PI / 6.0;
+constexpr double MAST3R_FINE_YAW_ACTION_ANGLE = M_PI / 12.0;
+constexpr double MAST3R_FINE_YAW_HALF_ANGLE = MAST3R_FINE_YAW_ACTION_ANGLE / 2.0;
+constexpr double OBJECT_VIEWPOINT_YAW_TOLERANCE = ACTION_ANGLE / 2.0 + M_PI / 90.0;
 
 // Distances (m)
 constexpr double STUCKING_DISTANCE = 0.05;       // consider stuck if movement < this
@@ -50,6 +56,16 @@ constexpr double MIN_SAFE_DISTANCE = 0.15;       // min safe distance to obstacl
 // Counters / thresholds
 constexpr int MAX_STUCKING_COUNT = 25;           // max consecutive stuck actions -> stop
 constexpr int MAX_STUCKING_NEXT_POS_COUNT = 14;  // times next_pos unchanged while stuck
+constexpr int MAST3R_LOCAL_GOAL_MAX_AGE = 4;     // fallback guard before an A* path is locked
+constexpr int MAST3R_LOCAL_GOAL_MAX_ACTIVE_AGE = 48;
+constexpr int MAST3R_LOCAL_GOAL_FORWARD_FAILURES_BEFORE_REPLAN = 2;
+constexpr int MAST3R_LOCAL_GOAL_MAX_REPLANS = 4;
+constexpr double MAST3R_EXECUTION_HORIZON_DISTANCE = 0.75;
+constexpr int OBJECT_VIEWPOINT_FORWARD_FAILURES_BEFORE_ADVANCE = 2;
+constexpr int OBJECT_VIEWPOINT_MAX_ALIGNMENT_STEPS = 8;
+constexpr double MAST3R_LOCAL_GOAL_REACH_DISTANCE = ACTION_DISTANCE;
+constexpr double INSTANCE_REJECT_RADIUS = 0.75;
+constexpr double INSINAV_SEMANTIC_GATE_THRESHOLD = 0.50;
 
 // Cost weights
 constexpr double TARGET_WEIGHT = 150.0;
@@ -89,7 +105,13 @@ private:
   ros::NodeHandle node_;
   ros::Timer exec_timer_, vis_timer_, frontier_timer_;
   ros::Subscriber trigger_sub_, odom_sub_, habitat_state_sub_, confidence_threshold_sub_;
+  ros::Subscriber mast3r_hint_sub_;
+  ros::Subscriber instance_stop_gate_sub_;
+  ros::Subscriber verified_approach_target_sub_;
+  ros::Subscriber resume_exploration_sub_;
   ros::Publisher action_pub_, ros_state_pub_, expl_state_pub_, expl_result_pub_;
+  ros::Publisher mast3r_refine_status_pub_;
+  ros::Publisher mast3r_debug_pub_;
   ros::Publisher robot_marker_pub_;
 
   /* Action Planner */
@@ -99,8 +121,17 @@ private:
   Vector2d selectLocalTarget(
       const Vector2d& current_pos, const vector<Vector2d>& path, const double& local_distance);
   int decideNextAction(double current_yaw, double target_yaw);
+  bool alignMast3rTargetYaw(double current_yaw);
+  bool planMast3rPath(const Vector2d& current_pos, const Vector2d& target_pos, bool is_replan);
+  void markMast3rForwardCollision(const Vector2d& current_pos, double current_yaw);
+  int planMast3rPathAction(
+      const Vector2d& current_pos, double current_yaw, const vector<Vector2d>& path);
   Vector2d computeBestStep(
       const Vector2d& current_pos, double current_yaw, const Vector2d& target_pos);
+  bool buildMast3rLocalTarget(
+      const Vector2d& current_pos, double current_yaw, Vector2d& target_pos, double& target_yaw);
+  void clearMast3rLocalGoal();
+  void publishMast3rRefineStatus(int status);
   double computeActionSafetyCost(const Vector2d& current_pos, const Vector2d& step);
   double computeActionTotalCost(const Vector2d& current_pos, double current_yaw,
       const Vector2d& target_pos, const Vector2d& step);
@@ -120,6 +151,11 @@ private:
   void odometryCallback(const nav_msgs::OdometryConstPtr& msg);
   void habitatStateCallback(const std_msgs::Int32ConstPtr& msg);
   void confidenceThresholdCallback(const std_msgs::Float64ConstPtr& msg);
+  void mast3rHintCallback(const std_msgs::Float32MultiArrayConstPtr& msg);
+  void instanceStopGateCallback(const std_msgs::Int32ConstPtr& msg);
+  void verifiedApproachTargetCallback(
+      const plan_env::MultipleMasksWithConfidenceConstPtr& msg);
+  void resumeExplorationCallback(const std_msgs::Int32ConstPtr& msg);
 
 public:
   ExplorationFSM() = default;

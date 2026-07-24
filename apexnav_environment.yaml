@@ -168,5 +168,6 @@ dependencies:
   - zstd=1.5.6=hc292b87_0
   - aihabitat::habitat-sim=0.3.1=py3.9_bullet_linux_3d6d67d6deae4ab2472cc84df7a3cef1503f606d
   - pip:
+      - empy==3.3.2
       - numpy==1.23.5
       - setuptools==69.2.0

@@ -37,6 +37,27 @@ RESULT_TYPES = [
 ]
 
 
+# Episode-level terminal outcomes.  Recoverable perception/refinement failures are
+# intentionally tracked separately in RECOVERABLE_FAILURE_EVENTS.
+TERMINATION_REASONS = [
+    "success",
+    "infeasible",
+    "no_coverable_frontier",
+    "no_passable_frontier",
+    "stucking",
+    "step_limit",
+    "false_positive",
+    "planner_resume_failure",
+    "unknown",
+]
+
+RECOVERABLE_FAILURE_EVENTS = [
+    "verification_failure",
+    "mast3r_planning_failure",
+    "mast3r_tracking_failure",
+]
+
+
 class FINAL_RESULT:
     EXPLORE = 0
     SEARCH_OBJECT = 1

@@ -57,6 +57,7 @@ class GoalState:
     similar_answers: List[str] = field(default_factory=list)
     room_hint: Optional[str] = None
     fusion_score: float = 0.0
+    clean_crop: Optional[np.ndarray] = None
 
 
 def crop_from_mask(rgb_image: np.ndarray, object_mask: np.ndarray, padding_ratio: float = 0.1):
@@ -277,8 +278,6 @@ class RealWorldINSiNavNode:
 
         rospy.loginfo("[INSiNav] goal image ready (%s)", reason)
         self.clip_client.set_goal_image(self.goal.image)
-        if self.lightglue_verifier is not None and self.lightglue_verifier.available:
-            self.lightglue_verifier.set_goal_image(self.goal.image)
 
         goal_label_candidates = []
         if self.goal_label:
@@ -294,6 +293,7 @@ class RealWorldINSiNavNode:
 
         self.goal.label_candidates = goal_label_candidates
         self.goal.primary_label = goal_label_candidates[0] if goal_label_candidates else None
+        self.goal.clean_crop = None
 
         if self.goal.primary_label:
             self.goal_label_pub_.publish(String(data=self.goal.primary_label))
@@ -301,10 +301,33 @@ class RealWorldINSiNavNode:
             rospy.loginfo(
                 "[INSiNav] primary goal label set to '%s'", self.goal.primary_label
             )
+            try:
+                _, goal_scores, goal_masks, _ = get_object(
+                    self.goal.primary_label,
+                    self.goal.image,
+                    self.config.detector,
+                    self.goal.similar_answers if self.insinav_filter_enabled else [],
+                )
+                if goal_masks:
+                    best_idx = int(np.argmax(goal_scores)) if goal_scores else 0
+                    crop_padding_ratio = float(
+                        self.lightglue_cfg.get("crop_padding_ratio", 0.1)
+                    ) if self.lightglue_cfg is not None else 0.1
+                    self.goal.clean_crop = crop_from_mask(
+                        self.goal.image, goal_masks[best_idx], crop_padding_ratio
+                    )
+            except Exception as exc:
+                rospy.logwarn("[INSiNav] failed to extract goal crop: %s", exc)
         else:
             rospy.logwarn(
                 "[INSiNav] goal label could not be inferred; perception will still use image similarity"
             )
+
+        if self.lightglue_verifier is not None and self.lightglue_verifier.available:
+            if self.goal.clean_crop is not None:
+                self.lightglue_verifier.set_goal_image(self.goal.clean_crop, goal_key="crop")
+            else:
+                self.lightglue_verifier.clear_goal(goal_key="crop")
 
         self.goal_ready = True
 
@@ -395,7 +418,9 @@ class RealWorldINSiNavNode:
                 lightglue_points = []
                 for object_mask in object_masks_list:
                     crop = crop_from_mask(rgb_cv, object_mask, crop_padding_ratio)
-                    lightglue_points.append(self.lightglue_verifier.match_points(crop))
+                    lightglue_points.append(
+                        self.lightglue_verifier.match_points(crop, goal_key="crop")
+                    )
 
                 if lightglue_points:
                     rospy.loginfo(

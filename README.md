@@ -128,6 +128,11 @@ conda env create -f apexnav_environment.yaml -y
 conda activate apexnav
 ```
 
+If you already created the environment before this update, install the ROS templating dependency once with:
+``` bash
+pip install empy==3.3.2
+```
+
 #### 2.3 Pytorch
 ``` bash
 # You can use 'nvcc --version' to check your CUDA version.
@@ -258,6 +263,11 @@ Note that `train` and `val_mini` are not required and you can choose to delete t
 ``` bash
 catkin_make -DPYTHON_EXECUTABLE=/usr/bin/python3
 ```
+
+If Catkin reports `Unable to find either executable 'empy' or Python module 'em'`, your environment is missing `empy`. Install it with `pip install empy==3.3.2`, or temporarily run:
+``` bash
+PYTHONPATH=/usr/lib/python3/dist-packages catkin_make -DPYTHON_EXECUTABLE=/home/jzw/conda/envs/apexnav/bin/python3
+```
 ### Run VLMs Servers
 Each command should be run in a separate terminal.
 ``` bash
@@ -266,6 +276,35 @@ python -m vlm.itm.blip2itm --port 12182
 python -m vlm.segmentor.sam --port 12183
 python -m vlm.detector.yolov7 --port 12184
 ```
+
+### MASt3R Close-Range Refinement
+The `insinav` pipeline can optionally use local `mast3r/` for close-range goal-view refinement.
+There are two confirmation routes. In the primary route, LightGlue runs independently on every
+frame; once confirmed, object-map or guarded visual approach moves toward the target, and entering
+the MASt3R distance gate invokes one pose estimate without any DINO stability requirement. In the
+fallback route, when LightGlue is not confirmed, a stable DINO crop candidate can invoke MASt3R
+without a candidate-depth gate. That fallback tracks the same mask across frames and keeps only
+MASt3R correspondences inside both the goal and current candidate masks.
+
+Both MASt3R routes estimate once and send one locked `(x, y, yaw)` target to ROS. The planner runs
+one A* search, follows the fixed path, then aligns the same target yaw before STOP; failure or
+timeout releases the target back to normal exploration without forcing STOP or replanning a
+second MASt3R target.
+
+Install the extra dependencies from the vendored repositories:
+```bash
+pip install -r mast3r/requirements.txt
+pip install -r mast3r/dust3r/requirements.txt
+pip install -r mast3r/dust3r/requirements_optional.txt
+```
+
+Download the MASt3R checkpoint if you do not want to rely on Hugging Face auto-download:
+```bash
+mkdir -p mast3r/checkpoints
+wget https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth -P mast3r/checkpoints/
+```
+
+Then point `config/habitat_eval_insinav.yaml` `mast3r_refine.weights` to the local checkpoint path, or leave it empty to use the default Hugging Face model name.
 ### Launch Visualization and Main Algorithm
 ```bash
 source ./devel/setup.bash && roslaunch exploration_manager rviz.launch # RViz visualization

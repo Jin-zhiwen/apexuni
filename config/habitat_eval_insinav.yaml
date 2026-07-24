@@ -76,27 +76,115 @@ insinav_filter:
   no_detection_patience: 8
   stop_gate_enabled: true
   stop_reject_turn_patience: 3
+  # Bound retries when an unverified goal-side FINISH must return to normal planning.
+  finish_resume_max_requests: 10
 
-# CLIP image-image similarity used to publish /blip2/cosine_score (value_map input scalar)
+# DINO image-image similarity for semantic_score_map.
+# Full-frame score is a persistent dense base; crop scores are local object/FOV
+# evidence published through /detector/semantic_clouds_with_scores and decay in map.
+# ROS object_map also uses these crop scores to gate SEARCH_BEST_OBJECT
+# when launching planner with semantic_gate_enabled:=true.
 clip:
   model_name: "dino_vits16"
   device: "cuda"
   use_candidate_crops: true
-  topk: 1
+  dense_full_frame_value_map: true
+  topk: 2
   crop_padding_ratio: 0.1
+  publish_semantic_object_clouds: true
   no_candidate_mode: "low_score" # options: low_score | full_frame
   no_candidate_score: 0.0
+  crop_score_weight: 1.0
+  full_frame_weight: 0.45
 
-# Optional LightGlue instance-level verification on detected crops
+# Optional LightGlue instance-level approach verification.
+# full_frame follows UniGoal-style current-frame vs goal-image matching and
+# gates approach before close-range MASt3R pose confirmation.
 lightglue:
   enabled: true
   device: "cuda"
-  max_num_keypoints: 1024
-  min_match_points: 30
-  blend_weight: 0.5
-  hard_gate: false
+  max_num_keypoints: 2048
+  verification_mode: "full_frame" # options: full_frame | crop
   crop_padding_ratio: 0.1
-  score_threshold: 50
+  approach_score_threshold: 100
+  # A full-frame match can originate from either couch when multiple detections coexist.
+  # Require the selected detection's crop to agree with the goal crop before it can preempt.
+  require_instance_crop_for_multi_candidate: true
+  # The same identity check is also required for a single current detection. Otherwise a
+  # lone chair/other couch box can pass a full-frame match and incorrectly launch MASt3R.
+  require_instance_crop_for_any_candidate: true
+  instance_crop_min_match_points: 10
+  approach_confirmation_patience: 8
+  verified_approach_enabled: true
+  verified_target_score: 0.95
+  visual_approach_enabled: true
+  visual_forward_clearance: 0.75
+  # Scores below no_box_direct.match_points_threshold may still use a short visual probe.
+  visual_approach_max_steps: 2
+  visual_approach_min_depth_progress: 0.10
+  finish_forward_margin: 0.15
+  # Bound close-range visual refresh actions while ROS is already in FINISH.
+  finish_verification_max_steps: 8
+  score_threshold: 100 # legacy fallback if approach_score_threshold is omitted
+  stop_distance: 1.0 # FINISH recovery distance only; final STOP is MASt3R-gated
+  # Detector-independent fallback. The normal box + crop-association route keeps
+  # priority; this route is considered only when that route cannot own the frame.
+  # It uses full-frame LightGlue evidence and can trigger MASt3R without any box.
+  no_box_direct:
+    enabled: true
+    match_points_threshold: 150
+    retry_cooldown_steps: 15
+
+mast3r_refine:
+  enabled: true
+  # Use all valid static-scene correspondences for pose estimation. Detection masks still
+  # help LightGlue/DINO decide whether this is the target, but do not crop MASt3R geometry.
+  # Set to "masked" only for the older object-mask-only geometry ablation.
+  geometry_mode: "full_frame"
+  mast3r_root: "mast3r"
+  weights: "" # empty -> use huggingface model name
+  device: "cuda"
+  stop_yaw_tolerance_deg: 15.0
+  # This limits the accepted/executed local SE(2) displacement; it does not gate inference.
+  max_local_goal_translation: 4.0
+  # Bound how long ROS may own any accepted one-shot local goal. A 4 m target can consume
+  # about 16 forward actions, and worst-case 15 deg final-yaw alignment needs another 12.
+  # Keep enough margin for A* path turns without letting a failed goal persist indefinitely.
+  max_pending_steps: 48
+  # A genuine A*/tracking failure releases the committed goal. All three visual routes may
+  # estimate a fresh fixed goal after this cooldown instead of remaining disabled forever.
+  execution_retry_cooldown_steps: 15
+  # While ROS recovers from FINISH, repeat the same locked goal briefly before releasing it.
+  finish_wakeup_retries: 8
+  # C++ applies these only while aligning the yaw of the same locked SE(2) goal.
+  # Python never re-estimates while that goal is active; a failed execution may retry later.
+  fine_yaw_turn_deg: 15.0
+  # Boxed LightGlue, detector-independent LightGlue, and DINO-direct routes all
+  # pass the same full-frame MASt3R geometry checks.
+  # LightGlue confirmation starts MASt3R immediately, regardless of candidate depth.
+  quality:
+    min_matches: 60
+    min_valid_matches: 40
+    min_inliers: 25
+    min_inlier_ratio: 0.30
+    # These three checks apply only when geometry_mode is "masked".
+    min_goal_mask_inlier_ratio: 0.90
+    min_current_mask_inlier_ratio: 0.90
+    min_joint_mask_inlier_ratio: 0.90
+    max_depth_error: 0.35
+    max_translation: 4.0
+    max_abs_yaw_deg: 120.0
+  # Parallel fallback: a stable high DINO crop score may invoke MASt3R without
+  # waiting for LightGlue or a candidate-depth threshold. LightGlue remains an
+  # independent per-frame route and does not use these DINO stability gates.
+  # After MASt3R passes full-frame geometry checks, ROS locks one (x,y,yaw)
+  # goal and plans it once.
+  direct:
+    enabled: true
+    dino_threshold: 0.60
+    min_stable_frames: 2
+    min_candidate_iou: 0.20
+    retry_cooldown_steps: 15
 
 default_fusion_threshold: 0.5
 

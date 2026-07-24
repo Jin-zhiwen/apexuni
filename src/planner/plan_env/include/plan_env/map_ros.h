@@ -40,6 +40,8 @@
 #include <pcl/common/common.h>
 #include <pcl/search/impl/search.hpp>
 #include <pcl/filters/conditional_removal.h>
+#include <algorithm>
+#include <cmath>
 #include <unordered_set>
 
 // Type aliases for convenience
@@ -66,6 +68,7 @@ private:
       const sensor_msgs::ImageConstPtr& img, const nav_msgs::OdometryConstPtr& pose);
   void updateESDFCallback(const ros::TimerEvent& /*event*/);
   void detectedObjectCloudCallback(const plan_env::MultipleMasksWithConfidenceConstPtr& msg);
+  void detectedSemanticCloudCallback(const plan_env::MultipleMasksWithConfidenceConstPtr& msg);
   void itmScoreCallback(const std_msgs::Float64ConstPtr& msg);
   void visCallback(const ros::TimerEvent& /*event*/);
 
@@ -89,10 +92,14 @@ private:
       const std::vector<int>& filter_object_ids);  ///< Extract undetected objects from depth data
 
   // Utility functions
+  bool computeCloudCentroid2D(const PointCloud3D& cloud, Eigen::Vector2d& centroid) const;
+  bool isDetectedCloudFresh(const sensor_msgs::PointCloud2& cloud, const std::string& source) const;
   bool interpolateLineAtZ(
       const Eigen::Vector3d& A, const Eigen::Vector3d& B, double target_z, Eigen::Vector2d& P);
   PointCloud3D::Ptr dbscan(const PointCloud3D::Ptr& cloud, double eps, int minPts);
   void dilateGrids(std::vector<Eigen::Vector2i>& grids, int dilation_radius);
+  bool isValueMapVisualCellFree(const Eigen::Vector2i& idx) const;
+  double smoothValueMapIntensity(const Eigen::Vector2i& idx) const;
 
   // Core mapping interface
   SDFMap2D* map_;
@@ -115,7 +122,7 @@ private:
       value_map_pub_, confidence_map_pub_;
 
   // ROS subscribers for sensor data
-  ros::Subscriber detected_object_cloud_sub_, itm_score_sub_;
+  ros::Subscriber detected_object_cloud_sub_, detected_semantic_cloud_sub_, itm_score_sub_;
 
   // ROS timers for periodic updates
   ros::Timer esdf_timer_, vis_timer_;
@@ -144,10 +151,21 @@ private:
   int proj_points_cnt_;                       ///< Count of valid projected points
   PointCloud3D::Ptr depth_cloud_;             ///< Raw 3D point cloud from depth sensor
   PointCloud2D::Ptr filtered_depth_cloud2d_;  ///< Filtered 2D point cloud for occupancy mapping
+  PointCloud2D::Ptr raycast_depth_cloud2d_;   ///< 2D depth endpoints for clearing free space
 
   // Object detection and ITM integration
   int continue_over_depth_count_;  ///< Counter for maintaining over-depth object consistency
   double itm_score_;               ///< Current image-text matching score
+  bool object_value_evidence_enabled_;
+  bool semantic_use_raycast_free_grids_;
+  double semantic_visual_free_space_floor_;
+  double semantic_visual_raw_min_;
+  double semantic_visual_raw_max_;
+  double object_evidence_weight_;
+  double object_evidence_decay_tau_;
+  double detected_cloud_max_age_;
+  vector<Eigen::Vector2i> latest_semantic_value_grids_;
+  ros::Time last_object_evidence_decay_time_;
   ros::Time map_start_time_;       ///< Timestamp of mapping system initialization
 
   friend SDFMap2D;
@@ -394,14 +412,91 @@ inline void MapROS::publishConfidenceMap()
   confidence_map_pub_.publish(cloud_msg);
 }
 
+inline bool MapROS::isValueMapVisualCellFree(const Eigen::Vector2i& idx) const
+{
+  if (!map_->isInMap(idx))
+    return false;
+
+  const int adr = map_->toAddress(idx);
+  if (map_->md_->occupancy_buffer_inflate_[adr] == 1)
+    return false;
+  if (map_->md_->occupancy_buffer_[adr] < map_->mp_->clamp_min_log_ - 1e-3)
+    return false;
+  if (map_->md_->occupancy_buffer_[adr] > map_->mp_->min_occupancy_log_)
+    return false;
+
+  return true;
+}
+
+inline double MapROS::smoothValueMapIntensity(const Eigen::Vector2i& idx) const
+{
+  constexpr int kSmoothRadius = 4;
+  constexpr double kSigma = 2.0;
+  constexpr double kMinRawValue = 1.0e-3;
+  const double visual_raw_min = std::max(0.0, std::min(1.0, semantic_visual_raw_min_));
+  const double visual_raw_max =
+      std::max(visual_raw_min + 1.0e-3, std::min(1.0, semantic_visual_raw_max_));
+  const double visual_floor =
+      std::max(0.0, std::min(1.0, semantic_visual_free_space_floor_));
+
+  double weighted_sum = 0.0;
+  double kernel_sum = 0.0;
+  double decayed_peak = 0.0;
+
+  for (int dx = -kSmoothRadius; dx <= kSmoothRadius; ++dx) {
+    for (int dy = -kSmoothRadius; dy <= kSmoothRadius; ++dy) {
+      const int dist2 = dx * dx + dy * dy;
+      if (dist2 > kSmoothRadius * kSmoothRadius)
+        continue;
+
+      const Eigen::Vector2i nbr = idx + Eigen::Vector2i(dx, dy);
+      if (!isValueMapVisualCellFree(nbr))
+        continue;
+
+      const double weight = std::exp(-0.5 * static_cast<double>(dist2) / (kSigma * kSigma));
+      kernel_sum += weight;
+
+      const double raw = map_->value_map_->getValue(nbr);
+      if (raw <= kMinRawValue)
+        continue;
+
+      weighted_sum += raw * weight;
+      decayed_peak = std::max(decayed_peak, raw * weight);
+    }
+  }
+
+  if (weighted_sum <= 1.0e-9 && decayed_peak <= 1.0e-9)
+    return visual_floor;
+
+  // Keep smoothing for readability, but publish the fused value directly instead
+  // of squeezing it through a narrow handcrafted window that can saturate RViz.
+  const double smoothed = kernel_sum > 1.0e-6 ? weighted_sum / kernel_sum : 0.0;
+  const double raw_clamped = std::max(0.0, std::min(1.0, std::max(smoothed, decayed_peak)));
+  const double visual_ratio = std::max(0.0,
+      std::min(1.0, (raw_clamped - visual_raw_min) / (visual_raw_max - visual_raw_min)));
+
+  return std::max(visual_floor, visual_ratio);
+}
+
 inline void MapROS::publishValueMap()
 {
   double value;
   pcl::PointCloud<pcl::PointXYZI> cloud;
   pcl::PointXYZI pt;
-
-  const double min_value = 0.0;
-  const double max_value = 1.0;
+  int free_cell_count = 0;
+  int raw_nonzero_count = 0;
+  int high_value_count = 0;
+  int object_dominant_count = 0;
+  double raw_min = 1.0;
+  double raw_max = 0.0;
+  double raw_sum = 0.0;
+  double smooth_min = 1.0;
+  double smooth_max = 0.0;
+  double smooth_sum = 0.0;
+  double base_sum = 0.0;
+  double object_sum = 0.0;
+  double confidence_sum = 0.0;
+  double confidence_max = 0.0;
 
   Eigen::Vector2i min_cut = map_->md_->update_min_;
   Eigen::Vector2i max_cut = map_->md_->update_max_;
@@ -410,25 +505,40 @@ inline void MapROS::publishValueMap()
 
   for (int x = min_cut(0); x <= max_cut(0); ++x) {
     for (int y = min_cut(1); y <= max_cut(1); ++y) {
-      value = map_->value_map_->getValue(Eigen::Vector2i(x, y));
-      if (value > 1e-3) {
-        // Only show values in free space (not inflated occupied or unknown)
-        if (map_->md_->occupancy_buffer_inflate_[map_->toAddress(x, y)] == 1)
-          continue;
-        if (map_->md_->occupancy_buffer_[map_->toAddress(x, y)] < map_->mp_->clamp_min_log_ - 1e-3)
-          continue;
-        if (map_->md_->occupancy_buffer_[map_->toAddress(x, y)] > map_->mp_->min_occupancy_log_)
-          continue;
+      const Eigen::Vector2i idx(x, y);
+      if (!isValueMapVisualCellFree(idx))
+        continue;
 
+      const double base_value = map_->value_map_->getBaseValue(idx);
+      const double object_value = map_->value_map_->getObjectValue(idx);
+      const double raw_value = map_->value_map_->getValue(idx);
+      const double confidence_value = map_->value_map_->getConfidence(idx);
+      value = smoothValueMapIntensity(idx);
+      ++free_cell_count;
+      raw_min = std::min(raw_min, raw_value);
+      raw_max = std::max(raw_max, raw_value);
+      raw_sum += raw_value;
+      smooth_min = std::min(smooth_min, value);
+      smooth_max = std::max(smooth_max, value);
+      smooth_sum += value;
+      base_sum += base_value;
+      object_sum += object_value;
+      confidence_sum += confidence_value;
+      confidence_max = std::max(confidence_max, confidence_value);
+      if (raw_value > 1e-3)
+        ++raw_nonzero_count;
+      if (value > 0.70)
+        ++high_value_count;
+      if (object_value > base_value + 1e-3)
+        ++object_dominant_count;
+
+      if (value > 1e-3) {
         Eigen::Vector2d pos_2d;
         map_->indexToPos(Eigen::Vector2i(x, y), pos_2d);
-        // Normalize value for visualization
-        value = std::min(value, max_value);
-        value = std::max(value, min_value);
         pt.x = pos_2d(0);
         pt.y = pos_2d(1);
         pt.z = 0.08;
-        pt.intensity = (value - min_value) / (max_value - min_value);
+        pt.intensity = value;
         cloud.push_back(pt);
       }
     }
@@ -441,6 +551,22 @@ inline void MapROS::publishValueMap()
   sensor_msgs::PointCloud2 cloud_msg;
   pcl::toROSMsg(cloud, cloud_msg);
   value_map_pub_.publish(cloud_msg);
+
+  if (free_cell_count > 0) {
+    const double inv_free_cell_count = 1.0 / static_cast<double>(free_cell_count);
+    ROS_INFO_THROTTLE(1.0,
+        "[VALUE_MAP_DEBUG] free=%d raw[min=%.3f mean=%.3f max=%.3f] "
+        "smooth[min=%.3f mean=%.3f max=%.3f] base_mean=%.3f object_mean=%.3f "
+        "conf_mean=%.3f conf_max=%.3f raw_nonzero=%d(%.1f%%) high(>0.70)=%d(%.1f%%) "
+        "object_dominant=%d(%.1f%%) floor=%.2f visual_raw=[%.2f, %.2f] itm=%.3f",
+        free_cell_count, raw_min, raw_sum * inv_free_cell_count, raw_max, smooth_min,
+        smooth_sum * inv_free_cell_count, smooth_max, base_sum * inv_free_cell_count,
+        object_sum * inv_free_cell_count, confidence_sum * inv_free_cell_count, confidence_max,
+        raw_nonzero_count, 100.0 * raw_nonzero_count * inv_free_cell_count, high_value_count,
+        100.0 * high_value_count * inv_free_cell_count, object_dominant_count,
+        100.0 * object_dominant_count * inv_free_cell_count, semantic_visual_free_space_floor_,
+        semantic_visual_raw_min_, semantic_visual_raw_max_, itm_score_);
+  }
 }
 
 inline void MapROS::publishPointCloud(

@@ -42,10 +42,19 @@ public:
   ~Astar2D();
   enum { REACH_END = 1, NO_PATH = 2 };
   enum SAFETY_MODE { NORMAL = 0, OPTIMISTIC = 1, EXTREME = 2 };
+  enum SEARCH_TERMINATION {
+    SEARCH_NOT_RUN = 0,
+    SEARCH_REACHED_END = 1,
+    SEARCH_TIME_LIMIT = 2,
+    SEARCH_OPEN_SET_EMPTY = 3,
+    SEARCH_NODE_POOL_EXHAUSTED = 4
+  };
   void init(ros::NodeHandle& nh, const SDFMap2D::Ptr& sdf_map);
   void reset();
   int astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d& end_pt,
       double success_dist = 0.1, double max_time = 0.01, int safety_mode = SAFETY_MODE::NORMAL);
+  int astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d& end_pt,
+      double success_dist, double max_time, int safety_mode, bool relax_near_start_safety);
   void setResolution(const double& res);
   static double pathLength(const std::vector<Eigen::Vector2d>& path);
   std::vector<Eigen::Vector2d> generateSteps(Eigen::Vector2d pos);
@@ -53,6 +62,11 @@ public:
   std::vector<Eigen::Vector2d> getPath();
   std::vector<Eigen::Vector2d> getVisited();
   double getEarlyTerminateCost();
+  int getLastSearchTermination() const;
+  const char* getLastSearchTerminationName() const;
+  int getLastUsedNodeNum() const;
+  int getLastIterationNum() const;
+  double getLastSearchDuration() const;
 
   double lambda_heu_;
 
@@ -72,6 +86,8 @@ private:
   std::unordered_map<Eigen::Vector2i, int, matrix_hash<Eigen::Vector2i>> close_set_map_;
   std::vector<Eigen::Vector2d> path_nodes_;
   double early_terminate_cost_;
+  int last_search_termination_;
+  double last_search_duration_;
 
   SDFMap2D::Ptr sdf_map_;
 

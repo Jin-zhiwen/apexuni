@@ -94,3 +94,39 @@ def read_record(continue_path, flag_once=False):
         distance_to_goal_reward_all,
         last_time,
     )
+
+
+def read_diagnostic_counts(continue_path, termination_reasons, failure_events, flag_once=False):
+    """Read the latest cumulative diagnostic counters from a continue record.
+
+    Older record files do not contain these rows, so missing values safely start at
+    zero.  This keeps evaluation resume backward-compatible.
+    """
+    termination_counts = {reason: 0 for reason in termination_reasons}
+    event_counts = {event: 0 for event in failure_events}
+    if flag_once or not os.path.exists(continue_path):
+        return termination_counts, event_counts
+
+    with open(continue_path, "r", encoding="utf-8") as file:
+        content = file.read()
+    records = re.split(r"Scene ID: ", content)
+    if len(records) <= 1:
+        return termination_counts, event_counts
+
+    latest_record = records[1]
+    for reason in termination_counts:
+        match = re.search(
+            rf"Total Termination {re.escape(reason)}\s+\|\s+(\d+)",
+            latest_record,
+        )
+        if match:
+            termination_counts[reason] = int(match.group(1))
+    for event in event_counts:
+        match = re.search(
+            rf"Total Event {re.escape(event)}\s+\|\s+(\d+)",
+            latest_record,
+        )
+        if match:
+            event_counts[event] = int(match.group(1))
+
+    return termination_counts, event_counts

@@ -10,11 +10,16 @@
 // Standard C++ libraries
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 // ROS core
 #include <ros/ros.h>
+#include <std_msgs/String.h>
 
 // Plan environment
 #include <plan_env/frontier_map2d.h>
@@ -75,6 +80,18 @@ public:
 
   int planNextBestPoint(const Vector3d& pos, const double& yaw);
   bool planTrajectory(const Eigen::VectorXd& start, const Eigen::VectorXd& end, const Vector3d& ctrl);
+  bool hasLockedObjectViewpoint() const;
+  Vector2d getLockedObjectViewpoint() const;
+  Vector2d getLockedObjectCenter() const;
+  double getObjectViewpointReachDistance() const;
+  bool isVerifiedApproachActive() const;
+  void setVerifiedApproachState(int state);
+  void setVerifiedApproachCloud(
+      const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud);
+  // Finish the current DINO inspection view and activate the next precomputed view, if any.
+  // The task remains a single active endpoint at all times.
+  bool advanceLockedObjectViewpoint(const Vector3d& pos, const std::string& reason);
+  void releaseObjectViewpointLock(bool reject_candidate, const std::string& reason);
   void getSortedSemanticFrontiers(const Vector2d& cur_pos, const vector<Vector2d>& frontiers,
       vector<SemanticFrontier>& sem_frontiers);
   void calcSemanticFrontierInfo(const vector<SemanticFrontier>& sem_frontiers, double& std_dev,
@@ -92,6 +109,47 @@ public:
   typedef shared_ptr<ExplorationManager> Ptr;
 
 private:
+  struct ObjectViewpointPlan {
+    Vector2d viewpoint = Vector2d::Zero();
+    Vector2d aim_point = Vector2d::Zero();
+    vector<Vector2d> path;
+    double score = -std::numeric_limits<double>::infinity();
+    double visible_ratio = 0.0;
+    double fov_deg = 0.0;
+    double standoff = 0.0;
+    double azimuth = 0.0;
+    int generated_candidates = 0;
+  };
+
+  struct ObjectViewpointSearchStats {
+    int cloud_points = 0;
+    int generated = 0;
+    int out_of_map = 0;
+    int non_free = 0;
+    int inflated = 0;
+    int safe = 0;
+    int ray_samples = 0;
+    int ray_unknown = 0;
+    int ray_known_blocked = 0;
+    int visibility_rejected = 0;
+    int visible = 0;
+    int astar_attempted = 0;
+    int astar_reached = 0;
+    int short_path = 0;
+    int selected = 0;
+  };
+
+  enum class ObjectInspectionGate { ELIGIBLE, COOLDOWN, EXHAUSTED };
+
+  struct ObjectInspectionFailure {
+    vector<int> object_ids;
+    int label = -1;
+    Vector2d center = Vector2d::Zero();
+    int failure_count = 0;
+    double best_failed_score = -std::numeric_limits<double>::infinity();
+    unsigned long cooldown_until_sequence = 0;
+  };
+
   // Exploration Policy
   void chooseExplorationPolicy(Vector2d cur_pos, vector<Vector2d> frontiers,
       Vector2d& next_best_pos, vector<Vector2d>& next_best_path);
@@ -103,11 +161,34 @@ private:
       vector<Vector2d>& next_best_path);
   void findTSPTourPolicy(Vector2d cur_pos, vector<Vector2d> frontiers, Vector2d& next_best_pos,
       vector<Vector2d>& next_best_path);
+  int planSemanticObjectOrFrontier(const Vector3d& pos, const double& yaw);
+  bool planVerifiedApproach(const Vector3d& pos);
+  double getFrontierBaseValue(const Vector2d& frontier_pos);
+  bool continueLockedObjectViewpoint(const Vector3d& pos);
+  bool activateLockedObjectViewpoint(const Vector3d& pos, size_t index,
+      const std::string& reason);
+  bool isObjectInspectionCompleted(const SemanticObjectCandidate& candidate) const;
+  void markObjectInspectionCompleted(int object_id, int label, unsigned long evidence_epoch);
+  ObjectInspectionFailure* findObjectInspectionFailure(
+      int object_id, int label, const Vector2d& center);
+  const ObjectInspectionFailure* findObjectInspectionFailure(
+      int object_id, int label, const Vector2d& center) const;
+  ObjectInspectionGate getObjectInspectionGate(const SemanticObjectCandidate& candidate,
+      unsigned long semantic_sequence, bool* stronger_retry = nullptr) const;
+  void recordObjectInspectionFailure(int object_id, int label, unsigned long evidence_epoch,
+      const Vector2d& center, double score, const std::string& reason);
+  bool prepareObjectViewpointPlans(const Vector3d& pos,
+      const SemanticObjectCandidate& candidate, vector<ObjectViewpointPlan>& plans);
+  void lockObjectViewpoint(
+      const SemanticObjectCandidate& candidate, const vector<ObjectViewpointPlan>& plans);
+  void publishObjectViewpointDebug(const std::string& text);
 
   // Path Search Utils
   bool searchObjectPath(const Vector3d& start,
       const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
       Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path);
+  bool searchObjectViewpointPaths(const Vector3d& start, const SemanticObjectCandidate& candidate,
+      vector<ObjectViewpointPlan>& plans, ObjectViewpointSearchStats* stats);
   bool searchObjectPathExtreme(const Vector3d& start,
       const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
       Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path);
@@ -131,7 +212,26 @@ private:
   vector<Vector2i> allNeighbors(const Eigen::Vector2i& idx, int grid_radius);
 
   ros::ServiceClient tsp_client_;         ///< ROS service client for TSP solver
+  ros::Publisher object_viewpoint_debug_pub_;
   unique_ptr<RayCaster2D> ray_caster2d_;  ///< Ray casting for collision checking
+
+  bool verified_approach_active_ = false;
+  bool verified_approach_target_locked_ = false;
+  bool verified_approach_target_failed_ = false;
+  Vector2d verified_approach_target_ = Vector2d::Zero();
+  pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> verified_approach_cloud_;
+  bool object_viewpoint_locked_ = false;
+  int locked_object_id_ = -1;
+  int locked_object_label_ = -1;
+  int object_viewpoint_lock_steps_ = 0;
+  size_t locked_object_viewpoint_index_ = 0;
+  unsigned long locked_object_evidence_epoch_ = 0;
+  double locked_object_score_ = -1.0;
+  Vector2d locked_object_center_ = Vector2d::Zero();
+  Vector2d locked_object_viewpoint_ = Vector2d::Zero();
+  vector<ObjectViewpointPlan> locked_object_viewpoint_plans_;
+  std::map<std::pair<int, int>, unsigned long> completed_object_evidence_epochs_;
+  vector<ObjectInspectionFailure> object_inspection_failures_;
 };
 
 inline bool ExplorationManager::searchFrontierPath(const Vector2d& start, const Vector2d& end,
