@@ -36,6 +36,7 @@ class SDFMap2D;
 class FrontierMap2D;
 class Gcopter;
 class KinoAstar;
+struct LocalTrajectory;
 struct ExplorationParam;
 struct ExplorationData;
 
@@ -75,7 +76,6 @@ public:
 
   int planNextBestPoint(const Vector3d& pos, const double& yaw);
   void setSkipObjectNavigationOnce(bool skip = true);
-  void setCloseObjectApproachOnce(bool close = true);
   bool planTrajectory(const Eigen::VectorXd& start, const Eigen::VectorXd& end, const Vector3d& ctrl);
   void getSortedSemanticFrontiers(const Vector2d& cur_pos, const vector<Vector2d>& frontiers,
       vector<SemanticFrontier>& sem_frontiers);
@@ -109,14 +109,17 @@ private:
   // Path Search Utils
   bool searchObjectPath(const Vector3d& start,
       const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
-      Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path,
-      bool close_approach = false);
+      Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path);
   bool searchObjectPathExtreme(const Vector3d& start,
       const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
       Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path);
   bool searchFrontierPath(const Vector2d& start, const Vector2d& end, Eigen::Vector2d& refined_pos,
       std::vector<Eigen::Vector2d>& refined_path);
   void shortenPath(vector<Vector2d>& path);
+  bool isTrajectoryCollisionFree(const LocalTrajectory& local_traj) const;
+  void publishFootprintCollisionMarker(
+      const Eigen::Vector2d& collision_pos,
+      double collision_time) const;
 
   // Helper functions for object path searching
   Vector2d findNearestObjectPoint(
@@ -131,12 +134,14 @@ private:
   void computeATSPCostMatrix(
       const Vector2d& cur_pos, const vector<Vector2d>& frontiers, Eigen::MatrixXd& cost_matrix);
   double computePathCost(const Vector2d& pos1, const Vector2d& pos2);
+  double getSemanticValueSafe(const Eigen::Vector2i& idx) const;
   vector<Vector2i> allNeighbors(const Eigen::Vector2i& idx, int grid_radius);
 
   ros::ServiceClient tsp_client_;         ///< ROS service client for TSP solver
+  ros::Publisher footprint_collision_marker_pub_;
   unique_ptr<RayCaster2D> ray_caster2d_;  ///< Ray casting for collision checking
+  std::string collision_marker_frame_id_ = "odom";
   bool skip_object_navigation_once_ = false;
-  bool close_object_approach_once_ = false;
 };
 
 inline bool ExplorationManager::searchObjectPathExtreme(const Vector3d& start,

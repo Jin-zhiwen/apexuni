@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from insinav_stop_gate import (
     frame_timing_status,
     locked_stop_gate_status,
     lightglue_candidate_passes,
+    perception_output_timing_status,
     resolve_similar_answers,
     select_goal_object_crop,
     stop_gate_status,
@@ -376,6 +379,28 @@ def test_rejected_detection_clouds_are_filtered_before_publishing():
     assert kept_labels == [0, 1]
 
 
+def test_planning_clouds_use_detection_scores_not_lightglue_gated_scores():
+    bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
+
+    assert "planning_object_masks_list, planning_score_list, planning_label_list = filter_positive_detection_results(" in bridge_source
+    assert "get_object_point_cloud(\n                    self.config,\n                    observations,\n                    planning_object_masks_list," in bridge_source
+    assert "semantic_object_masks_list = planning_object_masks_list" in bridge_source
+    assert re.search(
+        r"compute_dino_scores\(\s*rgb_cv,\s*semantic_object_masks_list,",
+        bridge_source,
+    )
+    assert "self.no_detection_steps = 0 if len(planning_object_masks_list) > 0" in bridge_source
+    assert "score_list, max_match_points, best_distance = self._apply_lightglue_gate(" not in bridge_source
+
+
+def test_real_world_node_uses_lightglue_only_for_stop_verification():
+    bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
+
+    assert "apply_unigoal_style_candidate_gate" not in bridge_source
+    assert "candidate_reject_patience" not in bridge_source
+    assert "LightGlue signal only" in bridge_source
+
+
 def test_goal_object_crop_selects_target_label_region():
     image = np.zeros((100, 200, 3), dtype=np.uint8)
     boxes = np.array(
@@ -550,6 +575,40 @@ def test_frame_timing_still_rejects_frozen_inputs_with_clock_offset():
     assert reason == "STALE_FRAME"
 
 
+def test_perception_output_timing_does_not_learn_new_clock_offset_after_processing():
+    ok, reason, effective_age = perception_output_timing_status(
+        raw_frame_age=1.1,
+        clock_offset=None,
+        max_output_age=0.5,
+    )
+
+    assert not ok
+    assert reason == "STALE_PERCEPTION_OUTPUT"
+    assert effective_age == 1.1
+
+
+def test_perception_output_timing_uses_known_clock_offset_only():
+    ok, reason, effective_age = perception_output_timing_status(
+        raw_frame_age=1000.4,
+        clock_offset=1000.0,
+        max_output_age=0.5,
+    )
+
+    assert ok
+    assert reason == "OK"
+    assert round(effective_age, 6) == 0.4
+
+    ok, reason, effective_age = perception_output_timing_status(
+        raw_frame_age=1000.9,
+        clock_offset=1000.0,
+        max_output_age=0.5,
+    )
+
+    assert not ok
+    assert reason == "STALE_PERCEPTION_OUTPUT"
+    assert round(effective_age, 6) == 0.9
+
+
 def test_real_world_bridge_uses_shared_stop_gate_logic():
     bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
 
@@ -571,35 +630,114 @@ def test_real_world_config_uses_weak_texture_stop_gate_for_real_chair_goal():
     assert "score_threshold: 70.0" in config_source
     assert "min_inlier_points: 25" in config_source
     assert "min_inlier_ratio: 0.30" in config_source
-    assert "candidate_min_match_points: 50" in config_source
-    assert "candidate_min_inlier_points: 15" in config_source
-    assert "candidate_min_inlier_ratio: 0.30" in config_source
+    assert "approach_min_match_points: 12" in config_source
+    assert "approach_min_inlier_points: 4" in config_source
+    assert "approach_min_inlier_ratio: 0.30" in config_source
+    assert "approach_lock_max_lost_frames: 3" in config_source
+    assert "approach_lock_max_distance: 1.6" in config_source
+    assert "\n  candidate_min_match_points:" not in config_source
+    assert "\n  candidate_min_inlier_points:" not in config_source
+    assert "\n  candidate_min_inlier_ratio:" not in config_source
+    assert "\n  candidate_reject_patience:" not in config_source
+    assert "\n  blend_weight:" not in config_source
+    assert "\n  hard_gate:" not in config_source
+    assert "\n  min_match_points:" not in config_source
     assert "use_object_crop_for_matching: true" in config_source
     assert "max_goal_auto_crop_area_ratio: 0.90" in config_source
     assert "goal_crop_roi: []" in config_source
 
 
-def test_real_world_config_uses_primary_label_only_for_image_goal():
+def test_real_world_config_keeps_planning_primary_label_only_but_enables_semantic_similar_candidates():
     config_source = (
         REPO_ROOT / "real_world_test_example" / "config" / "real_world_test_insinav.yaml"
     ).read_text()
 
     assert "use_similar_set: false" in config_source
+    assert "semantic_use_similar_set: true" in config_source
+    assert "llm_answer_path: llm/answers/llm_answer_hm3d.txt" in config_source
 
 
-def test_real_world_bridge_honors_use_similar_set_config():
+def test_real_world_bridge_separates_planning_and_semantic_similar_sets():
     bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
 
     assert "self.insinav_use_similar_set" in bridge_source
-    assert "resolve_similar_answers(" in bridge_source
+    assert "self.insinav_semantic_use_similar_set" in bridge_source
+    assert "planning_similar_answer = resolve_similar_answers(" in bridge_source
+    assert "semantic_similar_answer = resolve_similar_answers(" in bridge_source
+    assert "semantic_object_masks_list = planning_object_masks_list" in bridge_source
+    assert "semantic_score_source = \"planning\"" in bridge_source
+    assert "semantic_score_source = \"llm_similar\"" in bridge_source
+    assert "semantic_score_source = \"planning+llm_similar\"" in bridge_source
+    assert "semantic_score_scale_list = [1.0 for _ in planning_score_list]" in bridge_source
+    assert "semantic_similar_score_scale = semantic_similar_weight_from_fusion_score(" in bridge_source
+    assert "semantic_score_scale_list = list(semantic_score_scale_list) + similar_score_scales" in bridge_source
+    assert "score * semantic_score_scale_list[idx]" in bridge_source
+    assert "similar_masks_list" in bridge_source
+    assert "semantic_masks_list" not in bridge_source
+    assert re.search(
+        r"compute_dino_scores\(\s*rgb_cv,\s*semantic_object_masks_list,",
+        bridge_source,
+    )
+
+
+def test_real_world_bridge_runs_lightglue_before_semantic_similar_expansion():
+    bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
+
+    planning_filter_idx = bridge_source.index(
+        "planning_object_masks_list, planning_score_list, planning_label_list = filter_positive_detection_results"
+    )
+    lightglue_idx = bridge_source.index("self._update_lightglue_signal(", planning_filter_idx)
+    semantic_expansion_idx = bridge_source.index(
+        "semantic_similar_answer != planning_similar_answer", planning_filter_idx
+    )
+
+    assert planning_filter_idx < lightglue_idx < semantic_expansion_idx
 
 
 def test_real_world_bridge_drops_stale_synced_frames():
     bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
 
     assert "frame_timing_status(" in bridge_source
+    assert "perception_output_timing_status(" in bridge_source
+    assert "max_perception_output_age" in bridge_source
+    assert '"[INSiNav] drop stale perception output' in bridge_source
+    assert '"stamp": frame_ros_stamp' in bridge_source
     assert "queue_size=self.subscriber_queue_size" in bridge_source
     assert "queue_size=self.sync_queue_size" in bridge_source
+
+
+def test_object_point_cloud_preserves_source_frame_stamp():
+    point_cloud_source = (
+        REPO_ROOT / "basic_utils" / "object_point_cloud_utils" / "object_point_cloud.py"
+    ).read_text()
+    bridge_source = (REPO_ROOT / "real_world_test_example" / "real_world_test_insinav.py").read_text()
+
+    assert "def convert_to_pointcloud2(obj_point_cloud, stamp=None, frame_id=\"world\")" in point_cloud_source
+    assert "pc2.header.stamp = stamp if stamp is not None else rospy.Time.now()" in point_cloud_source
+    assert "cloud_stamp = observations.get(\"stamp\", None)" in point_cloud_source
+    assert "frame_ros_stamp = rospy.Time.now() - rospy.Duration(frame_age)" in bridge_source
+    assert "\"stamp\": frame_ros_stamp" in bridge_source
+
+
+def test_map_ros_drops_stale_detected_cloud_messages():
+    map_ros_header = (REPO_ROOT / "src" / "planner" / "plan_env" / "include" / "plan_env" / "map_ros.h").read_text()
+    map_ros_source = (REPO_ROOT / "src" / "planner" / "plan_env" / "src" / "map_ros.cpp").read_text()
+    launch_source = (
+        REPO_ROOT
+        / "src"
+        / "planner"
+        / "exploration_manager"
+        / "launch"
+        / "algorithm_traj.xml"
+    ).read_text()
+
+    assert "bool isDetectedCloudFresh(" in map_ros_header
+    assert "detected_cloud_max_age_" in map_ros_header
+    assert 'node_.param("detector/cloud_max_age", detected_cloud_max_age_, 0.8);' in map_ros_source
+    assert "Drop stale detected cloud" in map_ros_source
+    assert "isDetectedCloudFresh(msg->point_clouds[i], \"semantic\")" in map_ros_source
+    assert "isDetectedCloudFresh(cloud, \"object\")" in map_ros_source
+    assert 'name="detector/cloud_max_age" value="0.60"' in launch_source
 
 
 def test_map_ros_ignores_rejected_detection_clouds():

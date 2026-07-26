@@ -13,6 +13,7 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   std_msgs
   geometry_msgs
+  visualization_msgs
   plan_env
   path_searching
   vis_utils
@@ -24,7 +25,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES exploration_manager
-  CATKIN_DEPENDS plan_env path_searching vis_utils lkh_mtsp_solver
+  CATKIN_DEPENDS plan_env path_searching vis_utils lkh_mtsp_solver visualization_msgs
   #  DEPENDS system_lib
 )
 
@@ -43,6 +44,9 @@ add_executable(exploration_node
   src/exploration_fsm_traj_logic.cpp
   src/exploration_manager.cpp
 )
+add_dependencies(exploration_node
+  ${catkin_EXPORTED_TARGETS}
+)
 target_link_libraries(exploration_node
   ${catkin_LIBRARIES}
 )
@@ -53,6 +57,9 @@ if(CATKIN_ENABLE_TESTING)
     src/exploration_fsm_traj_logic.cpp
   )
   if(TARGET exploration_fsm_traj_logic_test)
+    add_dependencies(exploration_fsm_traj_logic_test
+      ${catkin_EXPORTED_TARGETS}
+    )
     target_link_libraries(exploration_fsm_traj_logic_test
       ${catkin_LIBRARIES}
       gtest_main

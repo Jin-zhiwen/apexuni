@@ -12,13 +12,14 @@ sync_slop: 0.05
 subscriber_queue_size: 1
 sync_queue_size: 2
 max_frame_age: 0.8
+max_perception_output_age: 0.60
 clock_offset_tolerance: 0.0
 max_sensor_pose_dt: 0.10
 max_rgb_depth_dt: 0.08
 
 goal:
   goal_type: ins-image
-  image_path: "/home/jzw/apexuni/ApexNav/data/screen.jpg"
+  image_path: "/home/jzw/apexuni/ApexNav/data/screen1.png"
   goal_label: ""
   goal_image_topic: ""
   infer_label: true
@@ -27,18 +28,29 @@ goal:
 insinav_filter:
   enabled: true
   use_similar_set: false  # 实机图像目标只用主类别，避免 couch/toilet/potted plant 等相似集合吸引误检
+  semantic_use_similar_set: false  # 语义分数图可用 llm_answer_hm3d similar 类扩展候选，但不直接发布为导航目标
   goal_topk: 2
   no_detection_patience: 8
 
 clip:
   model_name: "dino_vits16"
   device: "cuda"
-  # [修复1] 条件化 DINO 计分：仅在检测到物体时计算相似度
-  use_candidate_crops: true  # 仅使用检测到的物体裁剪，而不是全帧
-  topk: 1  # 取 top-1 相似度分数
+  # Dense semantic_score_map follows apexnavmain: publish one full-frame similarity
+  # score every synced goal frame, then project it over the current observed view.
+  dense_full_frame_value_map: true
+  use_candidate_crops: true  # crop scores remain available for optional object-cloud debugging
+  topk: 2
   crop_padding_ratio: 0.1
-  no_candidate_mode: "full_frame"  # 无候选时直接使用低分，避免全帧负相似度扰动
-  no_candidate_score: 0.0  # 没有检测到物体时的分数
+  publish_semantic_object_clouds: true
+  no_candidate_mode: "full_frame"
+  no_candidate_score: 0.0
+  crop_score_weight: 1.0
+  # 可选：把 no_candidate_mode 改为 "calibrated_full_frame" 时启用。full-frame
+  # 只写入高于近期背景的超额部分，并以低权重作为 view-level frontier bias。
+  full_frame_min_excess: 0.03
+  full_frame_scale: 0.20
+  full_frame_weight: 0.15
+  full_frame_background_window: 50
 
 lightglue:
   enabled: true
@@ -49,10 +61,6 @@ lightglue:
   goal_crop_padding_ratio: 0.12
   max_goal_auto_crop_area_ratio: 0.90  # YOLO 把整张 goal image 当目标时拒绝该自动 crop
   goal_crop_roi: []  # 可手动填 [x1, y1, x2, y2]，归一化坐标，例如 [0.05, 0.02, 0.95, 0.98]
-  min_match_points: 50  # 实例级候选 raw match 阈值，避免被同类 chair 误吸引
-  candidate_min_match_points: 50  # 导航候选必须先过实例匹配门，不能只凭 YOLO 类别
-  candidate_min_inlier_points: 15  # 导航候选 RANSAC 内点门，过滤同类但不同实例
-  candidate_min_inlier_ratio: 0.30
   approach_min_match_points: 12  # 已经锁定目标后，近距离弱纹理画面允许更低匹配数维持靠近
   approach_min_inlier_points: 4  # 近距离维持阶段允许更少内点，避免靠近后纹理视角变化立刻丢目标
   approach_min_inlier_ratio: 0.30
@@ -62,13 +70,11 @@ lightglue:
   min_inlier_points: 25  # 最终停止 RANSAC 内点数，比导航候选略严格
   min_inlier_ratio: 0.30  # 内点占匹配比例，过滤只匹配到局部椅背/桌边的候选
   ransac_reproj_threshold: 5.0
-  blend_weight: 0.7
-  hard_gate: true  # 硬门控：严格要求匹配点数
   crop_padding_ratio: 0.1
   stop_distance: 1.0  # 停止距离阈值（米）
   stop_enter_distance: 1.00  # 进入标称 1m 停止距离就开始确认，避免到目标后又转向离开
   stop_exit_distance: 1.10  # 进入停止候选后允许小幅深度抖动，不让状态频繁 PENDING_FAR
-  distance_percentile: 30.0  # 用 mask 内深度中位数判定停止，降低地面/前景边缘造成的偏近误停
+  distance_percentile: 50.0  # 用 mask 内深度中位数判定停止，降低地面/前景边缘造成的偏近误停
   stop_confirm_frames: 2  # 连续满足停止门的帧数，避免单帧 LightGlue/深度抖动误停
 
 # [修复3] 实机停止门机制启用

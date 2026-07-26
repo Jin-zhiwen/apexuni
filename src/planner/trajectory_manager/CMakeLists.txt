@@ -53,6 +53,10 @@ add_executable(traj_server
   src/traj_server.cpp
   src/mpc.cpp
 )
+add_dependencies(traj_server
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
+)
 target_link_libraries(traj_server
   ${catkin_LIBRARIES}
   OsqpEigen::OsqpEigen
@@ -60,4 +64,8 @@ target_link_libraries(traj_server
 
 add_library(trajectory_manager
   src/optimizer.cpp
+)
+add_dependencies(trajectory_manager
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS}
 )

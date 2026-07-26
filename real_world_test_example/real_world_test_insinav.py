@@ -25,6 +25,12 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from basic_utils.object_point_cloud_utils.object_point_cloud import get_object_point_cloud
+from insinav_semantic_scoring import (
+    FullFrameScoreCalibrator,
+    compute_dino_scores,
+    crop_from_mask,
+    semantic_similar_weight_from_fusion_score,
+)
 from insinav_stop_gate import (
     compensate_frame_age_for_clock_offset,
     crop_image_by_roi,
@@ -33,6 +39,7 @@ from insinav_stop_gate import (
     frame_timing_status,
     locked_stop_gate_status,
     lightglue_candidate_passes,
+    perception_output_timing_status,
     resolve_similar_answers,
     select_goal_object_crop,
     stop_gate_status_from_config,
@@ -56,81 +63,6 @@ class GoalState:
     similar_answers: List[str] = field(default_factory=list)
     room_hint: Optional[str] = None
     fusion_score: float = 0.0
-
-
-def crop_from_mask(rgb_image: np.ndarray, object_mask: np.ndarray, padding_ratio: float = 0.1):
-    ys, xs = np.where(object_mask > 0)
-    if len(xs) == 0 or len(ys) == 0:
-        return None
-
-    x1, x2 = xs.min(), xs.max()
-    y1, y2 = ys.min(), ys.max()
-
-    height, width = rgb_image.shape[:2]
-    box_width = x2 - x1 + 1
-    box_height = y2 - y1 + 1
-
-    pad_x = int(box_width * padding_ratio)
-    pad_y = int(box_height * padding_ratio)
-
-    x1 = max(0, x1 - pad_x)
-    y1 = max(0, y1 - pad_y)
-    x2 = min(width - 1, x2 + pad_x)
-    y2 = min(height - 1, y2 + pad_y)
-
-    if x2 <= x1 or y2 <= y1:
-        return None
-
-    return rgb_image[y1 : y2 + 1, x1 : x2 + 1]
-
-def compute_dino_scores(
-    rgb_image: np.ndarray,
-    object_masks_list: List[np.ndarray],
-    clip_client: DINOSimilarity,
-    use_candidate_crops: bool = True,
-    crop_padding_ratio: float = 0.1,
-    topk: int = 1,
-    no_candidate_mode: str = "low_score",
-    no_candidate_score: float = 0.0,
-) -> float:
-    clip_scores = []
-
-    if use_candidate_crops and len(object_masks_list) > 0:
-        for object_mask in object_masks_list:
-            crop = crop_from_mask(rgb_image, object_mask, crop_padding_ratio)
-            if crop is not None:
-                clip_scores.append(float(clip_client.cosine(crop)))
-
-    if len(clip_scores) > 0:
-        clip_scores_sorted = sorted(clip_scores, reverse=True)
-        k = min(max(1, topk), len(clip_scores_sorted))
-        cosine = float(np.mean(clip_scores_sorted[:k]))
-
-        rospy.loginfo_throttle(
-            1.0,
-            "[INSiNav] DINO crop similarity: %.3f, top%d/%d, max=%.3f",
-            cosine,
-            k,
-            len(clip_scores_sorted),
-            max(clip_scores_sorted),
-        )
-        return cosine
-
-    if no_candidate_mode == "full_frame":
-        cosine = float(clip_client.cosine(rgb_image))
-        rospy.loginfo_throttle(
-            1.0,
-            "[INSiNav] DINO full-frame similarity fallback: %.3f",
-            cosine,
-        )
-        return cosine
-
-    rospy.loginfo_throttle(
-        1.0,
-        "[INSiNav] no object candidates; using no_candidate_score=%.3f",
-        no_candidate_score,
-    )
-    return float(no_candidate_score)
 
 
 def infer_goal_categories_from_image(
@@ -247,6 +179,9 @@ class RealWorldINSiNavNode:
         )
         self.sync_queue_size = max(1, int(cfg.get("sync_queue_size", 2)))
         self.max_frame_age = float(cfg.get("max_frame_age", 0.5))
+        self.max_perception_output_age = float(
+            cfg.get("max_perception_output_age", self.max_frame_age)
+        )
         self.max_sensor_pose_dt = float(cfg.get("max_sensor_pose_dt", 0.1))
         self.max_rgb_depth_dt = float(cfg.get("max_rgb_depth_dt", 0.08))
         self.clock_offset_tolerance = float(cfg.get("clock_offset_tolerance", 900.0))
@@ -287,8 +222,16 @@ class RealWorldINSiNavNode:
         self.itm_score_pub_ = rospy.Publisher(
             "/blip2/cosine_score", Float64, queue_size=10
         )
+        self.itm_score_weight_pub_ = rospy.Publisher(
+            "/blip2/cosine_score_weight", Float64, queue_size=10
+        )
         self.cld_with_score_pub_ = rospy.Publisher(
             "/detector/clouds_with_scores", MultipleMasksWithConfidence, queue_size=10
+        )
+        self.semantic_cld_with_score_pub_ = rospy.Publisher(
+            "/detector/semantic_clouds_with_scores",
+            MultipleMasksWithConfidence,
+            queue_size=10,
         )
         self.detect_img_pub_ = rospy.Publisher(
             "/detector/detect_img", RosImage, queue_size=10
@@ -351,16 +294,34 @@ class RealWorldINSiNavNode:
         self.insinav_use_similar_set = bool(
             cfg.insinav_filter.get("use_similar_set", True)
         )
+        self.insinav_semantic_use_similar_set = bool(
+            cfg.insinav_filter.get(
+                "semantic_use_similar_set", self.insinav_use_similar_set
+            )
+        )
         self.no_detection_patience = max(
             1, int(cfg.insinav_filter.get("no_detection_patience", 8))
         )
         self.no_detection_steps = 0
 
         self.dino_use_candidate_crops = bool(cfg.clip.get("use_candidate_crops", True))
+        self.dino_dense_full_frame_value_map = bool(
+            cfg.clip.get("dense_full_frame_value_map", False)
+        )
         self.dino_topk = max(1, int(cfg.clip.get("topk", 1)))
         self.dino_crop_padding = float(cfg.clip.get("crop_padding_ratio", 0.1))
         self.dino_no_candidate_mode = str(cfg.clip.get("no_candidate_mode", "low_score"))
         self.dino_no_candidate_score = float(cfg.clip.get("no_candidate_score", 0.0))
+        self.dino_crop_score_weight = float(cfg.clip.get("crop_score_weight", 1.0))
+        self.publish_semantic_object_clouds = bool(
+            cfg.clip.get("publish_semantic_object_clouds", False)
+        )
+        self.full_frame_min_excess = float(cfg.clip.get("full_frame_min_excess", 0.03))
+        self.full_frame_scale = float(cfg.clip.get("full_frame_scale", 0.20))
+        self.full_frame_weight = float(cfg.clip.get("full_frame_weight", 0.15))
+        self.full_frame_calibrator = FullFrameScoreCalibrator(
+            window_size=int(cfg.clip.get("full_frame_background_window", 50))
+        )
         self.use_goal_object_crop_for_matching = bool(
             self.lightglue_cfg.get("use_object_crop_for_matching", True)
             if self.lightglue_cfg is not None
@@ -617,17 +578,43 @@ class RealWorldINSiNavNode:
         except Exception as exc:
             rospy.logerr("[INSiNav] failed to publish detect_img: %s", exc)
 
-    def _apply_lightglue_gate(self, rgb_cv, depth_img, object_masks_list, score_list, label_list):
+    def _perception_output_is_fresh(self, stamp, source: str) -> bool:
+        raw_frame_age = max(0.0, (rospy.Time.now() - stamp).to_sec())
+        ok, reason, effective_age = perception_output_timing_status(
+            raw_frame_age,
+            self.frame_clock_offset,
+            self.max_perception_output_age,
+        )
+        if not ok:
+            rospy.logwarn_throttle(
+                0.5,
+                "[INSiNav] drop stale perception output: source=%s reason=%s age=%.3f raw_age=%.3f max=%.3f offset=%s",
+                source,
+                reason,
+                effective_age,
+                raw_frame_age,
+                self.max_perception_output_age,
+                "none" if self.frame_clock_offset is None else f"{self.frame_clock_offset:.3f}",
+            )
+        return ok
+
+    def _update_lightglue_signal(
+        self, rgb_cv, depth_img, object_masks_list, label_list, frame_stamp=None
+    ):
         max_match_points = 0.0
         best_distance = float("inf")
         selected_match_points = 0.0
         selected_idx = -1
 
+        if frame_stamp is not None and not self._perception_output_is_fresh(
+            frame_stamp, "lightglue_start"
+        ):
+            return max_match_points, best_distance
+
         if (
             self.lightglue_verifier is None
             or not self.lightglue_verifier.available
             or len(object_masks_list) == 0
-            or len(score_list) != len(object_masks_list)
         ):
             self.lightglue_match_points_pub_.publish(Float64(data=0.0))
             self.target_distance_pub_.publish(Float64(data=-1.0))
@@ -664,39 +651,22 @@ class RealWorldINSiNavNode:
                 self.lightglue_stop_confirm_count = 0
                 self.last_locked_target_distance = float("inf")
                 self.insinav_stop_verified_pub_.publish(String(data="PENDING"))
-            return score_list, max_match_points, best_distance
+            return max_match_points, best_distance
 
-        min_match_points = max(1, int(self.lightglue_cfg.get("min_match_points", 60)))
-        candidate_min_match_points = max(
-            1, int(self.lightglue_cfg.get("candidate_min_match_points", min_match_points))
-        )
         score_threshold = float(self.lightglue_cfg.get("score_threshold", 60.0))
         stop_distance = float(self.lightglue_cfg.get("stop_distance", 0.7))
-        hard_gate = bool(self.lightglue_cfg.get("hard_gate", True))
         crop_padding_ratio = float(self.lightglue_cfg.get("crop_padding_ratio", 0.1))
         distance_percentile = float(self.lightglue_cfg.get("distance_percentile", 50.0))
         min_inlier_points = float(self.lightglue_cfg.get("min_inlier_points", 0.0))
         min_inlier_ratio = float(self.lightglue_cfg.get("min_inlier_ratio", 0.0))
-        candidate_min_inlier_points = float(
-            self.lightglue_cfg.get("candidate_min_inlier_points", min_inlier_points)
-        )
-        candidate_min_inlier_ratio = float(
-            self.lightglue_cfg.get("candidate_min_inlier_ratio", min_inlier_ratio)
-        )
         approach_min_match_points = float(
-            self.lightglue_cfg.get(
-                "approach_min_match_points", min(candidate_min_match_points, score_threshold)
-            )
+            self.lightglue_cfg.get("approach_min_match_points", score_threshold)
         )
         approach_min_inlier_points = float(
-            self.lightglue_cfg.get(
-                "approach_min_inlier_points", min(candidate_min_inlier_points, min_inlier_points)
-            )
+            self.lightglue_cfg.get("approach_min_inlier_points", min_inlier_points)
         )
         approach_min_inlier_ratio = float(
-            self.lightglue_cfg.get(
-                "approach_min_inlier_ratio", min(candidate_min_inlier_ratio, min_inlier_ratio)
-            )
+            self.lightglue_cfg.get("approach_min_inlier_ratio", min_inlier_ratio)
         )
         approach_lock_max_lost_frames = max(
             0, int(self.lightglue_cfg.get("approach_lock_max_lost_frames", 3))
@@ -818,6 +788,11 @@ class RealWorldINSiNavNode:
             selected_inlier_points = 0.0
             selected_inlier_ratio = 0.0
 
+        if frame_stamp is not None and not self._perception_output_is_fresh(
+            frame_stamp, "lightglue_result"
+        ):
+            return max_match_points, best_distance
+
         acquire_ok = lightglue_candidate_passes(
             selected_match_points,
             selected_inlier_points,
@@ -850,55 +825,18 @@ class RealWorldINSiNavNode:
         elif not self.lightglue_target_locked:
             self.last_locked_target_distance = float("inf")
 
-        if hard_gate:
-            accepted_candidates = 0
-            for idx, base_score in enumerate(score_list):
-                if idx >= len(lightglue_points):
-                    continue
-                candidate_ok = lightglue_candidate_passes(
-                    lightglue_points[idx],
-                    lightglue_inliers[idx],
-                    lightglue_inlier_ratios[idx],
-                    candidate_min_match_points,
-                    candidate_min_inlier_points,
-                    candidate_min_inlier_ratio,
-                )
-                keep_locked_selected = (
-                    self.lightglue_target_locked
-                    and idx == selected_idx
-                    and lightglue_candidate_passes(
-                        lightglue_points[idx],
-                        lightglue_inliers[idx],
-                        lightglue_inlier_ratios[idx],
-                        approach_min_match_points,
-                        approach_min_inlier_points,
-                        approach_min_inlier_ratio,
-                    )
-                )
-                if candidate_ok or keep_locked_selected:
-                    accepted_candidates += 1
-                else:
-                    score_list[idx] = 0.0
-            rospy.loginfo_throttle(
-                1.0,
-                "[INSiNav] LightGlue candidate gate: accepted=%d/%d, require match>=%.0f inliers>=%.0f ratio>=%.2f",
-                accepted_candidates,
-                len(lightglue_points),
-                candidate_min_match_points,
-                candidate_min_inlier_points,
-                candidate_min_inlier_ratio,
-            )
-            rospy.loginfo_throttle(
-                1.0,
-                "[INSiNav] LightGlue approach lock: active=%s lost=%d/%d tracking>=%.0f/%.0f/%.2f dist<=%.2f",
-                str(self.lightglue_target_locked),
-                self.lightglue_target_lost_frames,
-                approach_lock_max_lost_frames,
-                approach_min_match_points,
-                approach_min_inlier_points,
-                approach_min_inlier_ratio,
-                approach_lock_max_distance,
-            )
+        rospy.loginfo_throttle(
+            1.0,
+            "[INSiNav] LightGlue signal only: selected_idx=%d active=%s lost=%d/%d tracking>=%.0f/%.0f/%.2f dist<=%.2f; object clouds are not filtered by LightGlue",
+            selected_idx,
+            str(self.lightglue_target_locked),
+            self.lightglue_target_lost_frames,
+            approach_lock_max_lost_frames,
+            approach_min_match_points,
+            approach_min_inlier_points,
+            approach_min_inlier_ratio,
+            approach_lock_max_distance,
+        )
 
         self.lightglue_match_points_pub_.publish(Float64(data=selected_match_points))
         self.target_distance_pub_.publish(
@@ -984,7 +922,7 @@ class RealWorldINSiNavNode:
                     self.lightglue_stop_confirm_frames,
                 )
 
-        return score_list, max_match_points, best_distance
+        return max_match_points, best_distance
 
     def sync_callback(self, rgb_msg, depth_msg, sensor_pose_msg):
         rospy.loginfo_throttle(1.0, "[INSiNav] sync_callback triggered")
@@ -1035,6 +973,8 @@ class RealWorldINSiNavNode:
                 )
                 return
 
+            frame_ros_stamp = rospy.Time.now() - rospy.Duration(frame_age)
+
             goal_label = self._current_goal_label()
             if goal_label is None:
                 rospy.logwarn_throttle(
@@ -1078,24 +1018,30 @@ class RealWorldINSiNavNode:
                 depth_max_dbg,
             )
 
-            similar_answer = resolve_similar_answers(
+            planning_similar_answer = resolve_similar_answers(
                 self.insinav_filter_enabled,
                 self.insinav_use_similar_set,
+                self.goal.similar_answers,
+            )
+            semantic_similar_answer = resolve_similar_answers(
+                self.insinav_filter_enabled,
+                self.insinav_semantic_use_similar_set,
                 self.goal.similar_answers,
             )
 
             rospy.loginfo_throttle(
                 1.0,
-                "[INSiNav] get_object label=%s, similar=%s",
+                "[INSiNav] get_object label=%s, planning_similar=%s, semantic_similar=%s",
                 goal_label,
-                similar_answer,
+                planning_similar_answer,
+                semantic_similar_answer,
             )
 
             detect_img, score_list, object_masks_list, label_list = get_object(
                 goal_label,
                 rgb_cv,
                 self.config.detector,
-                similar_answer,
+                planning_similar_answer,
             )
 
             rospy.loginfo_throttle(
@@ -1107,20 +1053,77 @@ class RealWorldINSiNavNode:
             # 关键：检测图像必须立刻发布，不要等点云 / LightGlue / DINO
             self._publish_detect_img(detect_img, rgb_msg.header)
 
-            # LightGlue 只用于过滤 score 和发布 stop verification，不应该阻塞 detect_img
-            if self.has_goal_image:
-                score_list, max_match_points, best_distance = self._apply_lightglue_gate(
-                rgb_cv,
-                depth_img,
+            planning_object_masks_list, planning_score_list, planning_label_list = filter_positive_detection_results(
                 object_masks_list,
                 score_list,
                 label_list,
             )
+            semantic_object_masks_list = planning_object_masks_list
+            semantic_score_list = list(planning_score_list)
+            semantic_label_list = list(planning_label_list)
+            semantic_score_scale_list = [1.0 for _ in planning_score_list]
+            semantic_score_source = "planning"
+
+            # LightGlue 只发布目标确认/停止验证信号，不参与规划 object cloud 筛选。
+            # Run it before semantic-similar expansion so stop verification is
+            # not delayed by the extra detector pass used only for value-map evidence.
+            if self.has_goal_image:
+                max_match_points, best_distance = self._update_lightglue_signal(
+                    rgb_cv,
+                    depth_img,
+                    planning_object_masks_list,
+                    planning_label_list,
+                    frame_stamp=stamp,
+                )
             else:
                 self.lightglue_match_points_pub_.publish(Float64(data=0.0))
                 self.insinav_stop_verified_pub_.publish(String(data="NO_GOAL_IMAGE"))
 
-            # 点云生成放在 detect_img 和 LightGlue 之后
+            if (
+                semantic_similar_answer != planning_similar_answer
+                and len(semantic_similar_answer) > 0
+            ):
+                try:
+                    _, similar_score_list_raw, similar_masks_list, similar_label_list_raw = get_object(
+                        goal_label,
+                        rgb_cv,
+                        self.config.detector,
+                        semantic_similar_answer,
+                    )
+                    similar_masks, similar_scores, similar_labels = filter_positive_detection_results(
+                        similar_masks_list,
+                        similar_score_list_raw,
+                        similar_label_list_raw,
+                    )
+                    if len(similar_masks) > 0:
+                        if len(semantic_object_masks_list) == 0:
+                            semantic_score_source = "llm_similar"
+                        else:
+                            semantic_score_source = "planning+llm_similar"
+                        semantic_object_masks_list = list(semantic_object_masks_list) + similar_masks
+                        semantic_score_list = list(semantic_score_list) + similar_scores
+                        semantic_label_list = list(semantic_label_list) + similar_labels
+                        semantic_similar_score_scale = semantic_similar_weight_from_fusion_score(
+                            self.goal.fusion_score
+                        )
+                        similar_score_scales = [
+                            semantic_similar_score_scale for _ in similar_scores
+                        ]
+                        semantic_score_scale_list = list(semantic_score_scale_list) + similar_score_scales
+                        rospy.loginfo_throttle(
+                            1.0,
+                            "[INSiNav] semantic DINO candidates from llm_answer_hm3d similar set: %d, fusion_weight=%.3f",
+                            len(similar_masks),
+                            semantic_similar_score_scale,
+                        )
+                except Exception as exc:
+                    rospy.logwarn_throttle(
+                        1.0,
+                        "[INSiNav] semantic similar candidate expansion failed: %s",
+                        exc,
+                    )
+
+            # 点云生成使用检测/语义分数过滤结果，不使用 LightGlue 几何验证结果过滤候选。
             obj_point_cloud_list = []
             try:
                 gps, compass = inverse_habitat_publisher_transform(
@@ -1131,12 +1134,13 @@ class RealWorldINSiNavNode:
                     "depth": depth_cv,
                     "gps": gps,
                     "compass": compass,
+                    "stamp": frame_ros_stamp,
                 }
 
                 obj_point_cloud_list = get_object_point_cloud(
                     self.config,
                     observations,
-                    object_masks_list,
+                    planning_object_masks_list,
                 )
 
             except Exception as exc:
@@ -1146,17 +1150,18 @@ class RealWorldINSiNavNode:
                     exc,
                 )
 
-            obj_point_cloud_list, score_list, label_list = filter_positive_detection_results(
+            obj_point_cloud_list, planning_score_list, planning_label_list = filter_positive_detection_results(
                 obj_point_cloud_list,
-                score_list,
-                label_list,
+                planning_score_list,
+                planning_label_list,
             )
 
-            if obj_point_cloud_list:
+            object_outputs_fresh = self._perception_output_is_fresh(stamp, "object_clouds")
+            if object_outputs_fresh and obj_point_cloud_list:
                 cld_with_score_msg = MultipleMasksWithConfidence()
                 cld_with_score_msg.point_clouds = obj_point_cloud_list
-                cld_with_score_msg.confidence_scores = score_list
-                cld_with_score_msg.label_indices = label_list
+                cld_with_score_msg.confidence_scores = planning_score_list
+                cld_with_score_msg.label_indices = planning_label_list
                 self.cld_with_score_pub_.publish(cld_with_score_msg)
 
                 rospy.loginfo_throttle(
@@ -1164,38 +1169,116 @@ class RealWorldINSiNavNode:
                     "[INSiNav] published /detector/clouds_with_scores, num=%d",
                     len(obj_point_cloud_list),
                 )
-            else:
+            elif object_outputs_fresh:
                 rospy.loginfo_throttle(
                     1.0,
                     "[INSiNav] no positive detection clouds to publish after gating",
                 )
 
             # DINO 只有在 goal image 存在时才有意义
-            if self.has_goal_image:
+            if self.has_goal_image and self._perception_output_is_fresh(stamp, "dino_start"):
                 try:
-                    cosine = compute_dino_scores(
+                    cosine, score_weight, dino_score_source, ranked_crop_scores = compute_dino_scores(
                         rgb_cv,
-                        object_masks_list,
+                        semantic_object_masks_list,
                         self.clip_client,
                         use_candidate_crops=self.dino_use_candidate_crops,
                         crop_padding_ratio=self.dino_crop_padding,
                         topk=self.dino_topk,
                         no_candidate_mode=self.dino_no_candidate_mode,
                         no_candidate_score=self.dino_no_candidate_score,
+                        full_frame_calibrator=self.full_frame_calibrator,
+                        full_frame_min_excess=self.full_frame_min_excess,
+                        full_frame_scale=self.full_frame_scale,
+                        full_frame_weight=self.full_frame_weight,
+                        crop_score_weight=self.dino_crop_score_weight,
+                        return_details=True,
                     )
 
-                    self.itm_score_pub_.publish(Float64(data=float(cosine)))
+                    dense_value_score = float(cosine)
+                    dense_value_weight = float(score_weight)
+                    dense_value_source = dino_score_source
+                    if self.dino_dense_full_frame_value_map:
+                        dense_value_score = float(self.clip_client.cosine(rgb_cv))
+                        dense_value_weight = 1.0
+                        dense_value_source = "dense_full_frame"
 
-                    rospy.loginfo_throttle(
-                        1.0,
-                        "[INSiNav] published /blip2/cosine_score: %.3f",
-                        cosine,
-                    )
+                    if self._perception_output_is_fresh(stamp, "dino_result"):
+                        self.itm_score_pub_.publish(Float64(data=float(dense_value_score)))
+                        self.itm_score_weight_pub_.publish(Float64(data=float(dense_value_weight)))
+
+                        if (
+                            self.publish_semantic_object_clouds
+                            and dino_score_source == "crop"
+                            and ranked_crop_scores
+                        ):
+                            selected_pairs = ranked_crop_scores[: self.dino_topk]
+                            selected_masks = [
+                                semantic_object_masks_list[idx]
+                                for idx, _ in selected_pairs
+                                if idx < len(semantic_object_masks_list)
+                            ]
+                            selected_scores = [
+                                float(score * semantic_score_scale_list[idx])
+                                for idx, score in selected_pairs
+                                if idx < len(semantic_object_masks_list)
+                                and idx < len(semantic_score_scale_list)
+                            ]
+                            selected_labels = [
+                                int(semantic_label_list[idx])
+                                for idx, _ in selected_pairs
+                                if idx < len(semantic_label_list)
+                                and idx < len(semantic_object_masks_list)
+                            ]
+                            semantic_cloud_msg = MultipleMasksWithConfidence()
+                            if selected_masks:
+                                gps, compass = inverse_habitat_publisher_transform(
+                                    sensor_pose_msg,
+                                    self.camera_height,
+                                )
+                                semantic_observations = {
+                                    "depth": depth_cv,
+                                    "gps": gps,
+                                    "compass": compass,
+                                    "stamp": frame_ros_stamp,
+                                }
+                                semantic_cloud_msg.point_clouds = get_object_point_cloud(
+                                    self.config,
+                                    semantic_observations,
+                                    selected_masks,
+                                )
+                                (
+                                    semantic_cloud_msg.point_clouds,
+                                    semantic_cloud_msg.confidence_scores,
+                                    semantic_cloud_msg.label_indices,
+                                ) = filter_positive_detection_results(
+                                    semantic_cloud_msg.point_clouds,
+                                    selected_scores,
+                                    selected_labels,
+                                )
+                            if (
+                                semantic_cloud_msg.point_clouds
+                                and self._perception_output_is_fresh(
+                                    stamp, "semantic_object_clouds"
+                                )
+                            ):
+                                self.semantic_cld_with_score_pub_.publish(semantic_cloud_msg)
+
+                        rospy.loginfo_throttle(
+                            1.0,
+                            "[INSiNav] published /blip2/cosine_score: %.3f weight=%.3f (source=%s, crop_score=%.3f, crop_source=%s, candidates=%s)",
+                            dense_value_score,
+                            dense_value_weight,
+                            dense_value_source,
+                            cosine,
+                            dino_score_source,
+                            semantic_score_source,
+                        )
 
                 except Exception as exc:
                     rospy.logerr("[INSiNav] DINO similarity failed: %s", exc)
 
-            self.no_detection_steps = 0 if len(object_masks_list) > 0 else self.no_detection_steps + 1
+            self.no_detection_steps = 0 if len(planning_object_masks_list) > 0 else self.no_detection_steps + 1
 
             if self.no_detection_steps >= self.no_detection_patience:
                 rospy.logwarn_throttle(

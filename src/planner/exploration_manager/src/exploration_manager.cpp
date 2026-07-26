@@ -10,10 +10,14 @@
 
 #include <exploration_manager/exploration_manager.h>
 #include <exploration_manager/exploration_data.h>
+#include <exploration_manager/exploration_fsm_traj_logic.h>
 #include <lkh_mtsp_solver/SolveMTSP.h>
 #include <plan_env/map_ros.h>
 #include <path_searching/kino_astar.h>
 #include <trajectory_manager/optimizer.h>
+
+#include <algorithm>
+#include <cmath>
 
 using namespace Eigen;
 
@@ -43,6 +47,9 @@ void ExplorationManager::initialize(ros::NodeHandle& nh)
   nh.param("exploration/max_to_mean_threshold", ep_->max_to_mean_threshold_, 1.2);
   nh.param("exploration/max_to_mean_percentage", ep_->max_to_mean_percentage_, 0.95);
   nh.param("exploration/tsp_dir", ep_->tsp_dir_, string("null"));
+  nh.param("map_ros/frame_id", collision_marker_frame_id_, std::string("odom"));
+  footprint_collision_marker_pub_ =
+      nh.advertise<visualization_msgs::Marker>("/planning_vis/footprint_collision", 1, true);
 
   // Get map parameters for ray casting initialization
   double resolution = sdf_map_->getResolution();
@@ -71,13 +78,8 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   auto t2 = t1;
   const bool skip_object_navigation = skip_object_navigation_once_;
   skip_object_navigation_once_ = false;
-  const bool close_object_approach = close_object_approach_once_;
-  close_object_approach_once_ = false;
   if (skip_object_navigation) {
     ROS_WARN("[Navigation Mode] Skipping object navigation once after unverified or unreachable target.");
-  }
-  if (close_object_approach) {
-    ROS_WARN("[Navigation Mode] Using close object approach because LightGlue status was PENDING_FAR.");
   }
 
   // Clear previous planning results
@@ -90,21 +92,9 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   if (!skip_object_navigation && !object_clouds.empty()) {
     ROS_WARN("[Navigation Mode] Get object_cloud num = %ld", object_clouds.size());
 
-    // When LightGlue says the target is correct but still far, prefer the latest
-    // detector cloud over the fused object map so old object cells do not trap us.
-    if (close_object_approach && object_map2d_->all_object_clouds_ &&
-        !object_map2d_->all_object_clouds_->points.empty()) {
-      ROS_WARN("[Navigation Mode] Using latest detector object cloud for close approach, points = %ld",
-          object_map2d_->all_object_clouds_->points.size());
-      if (searchObjectPath(
-              pos, object_map2d_->all_object_clouds_, ed_->next_pos_, ed_->next_best_path_, true))
-        return SEARCH_BEST_OBJECT;
-    }
-
     // Try to find path to each detected object in order of confidence
     for (auto object_cloud : object_clouds) {
-      if (searchObjectPath(
-              pos, object_cloud, ed_->next_pos_, ed_->next_best_path_, close_object_approach))
+      if (searchObjectPath(pos, object_cloud, ed_->next_pos_, ed_->next_best_path_))
         return SEARCH_BEST_OBJECT;
     }
   }
@@ -113,8 +103,7 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   if (!skip_object_navigation && !object_map2d_->over_depth_object_cloud_->points.empty()) {
     ROS_WARN("[Navigation Mode (Over Depth)] Get over depth object cloud");
     if (searchObjectPath(
-            pos, object_map2d_->over_depth_object_cloud_, ed_->next_pos_, ed_->next_best_path_,
-            close_object_approach))
+            pos, object_map2d_->over_depth_object_cloud_, ed_->next_pos_, ed_->next_best_path_))
       return SEARCH_OVER_DEPTH_OBJECT;
   }
 
@@ -136,8 +125,7 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
 
     // Try suspicious objects as backup
     if (!skip_object_navigation && !top_object_cloud->points.empty() &&
-        searchObjectPath(
-            pos, top_object_cloud, ed_->next_pos_, ed_->next_best_path_, close_object_approach))
+        searchObjectPath(pos, top_object_cloud, ed_->next_pos_, ed_->next_best_path_))
       return SEARCH_SUSPICIOUS_OBJECT;
     else
       // Try dormant frontiers as last resort
@@ -206,18 +194,22 @@ void ExplorationManager::setSkipObjectNavigationOnce(bool skip)
   skip_object_navigation_once_ = skip;
 }
 
-void ExplorationManager::setCloseObjectApproachOnce(bool close)
-{
-  close_object_approach_once_ = close;
-}
-
 bool ExplorationManager::searchFrontierPath(const Vector2d& start, const Vector2d& end,
     Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path)
 {
   path_finder_->reset();
   if (path_finder_->astarSearch(start, end, 0.25, 0.01) == Astar2D::REACH_END) {
-    refined_pos = end;
     refined_path = path_finder_->getPath();
+    shortenPath(refined_path);
+    refined_pos = end;
+    for (int i = static_cast<int>(refined_path.size()) - 1; i >= 0; --i) {
+      const Vector2d& pos = refined_path[i];
+      if (sdf_map_->getOccupancy(pos) == SDFMap2D::FREE &&
+          sdf_map_->getInflateOccupancy(pos) != 1) {
+        refined_pos = pos;
+        break;
+      }
+    }
     return true;
   }
   return false;
@@ -302,8 +294,8 @@ void ExplorationManager::findHighestSemanticsFrontierPolicy(Vector2d cur_pos,
     auto nbrs = allNeighbors(idx, 2);  // 5x5 neighborhood
 
     // Find maximum semantic value in local neighborhood
-    double value = sdf_map_->value_map_->getValue(idx);
-    for (auto nbr : nbrs) value = max(value, sdf_map_->value_map_->getValue(nbr));
+    double value = getSemanticValueSafe(idx);
+    for (auto nbr : nbrs) value = max(value, getSemanticValueSafe(nbr));
 
     frontier_values.emplace_back(frontier, value);
   }
@@ -587,8 +579,7 @@ bool ExplorationManager::trySearchObjectPathWithDistance(const Vector2d& start2d
 
 bool ExplorationManager::searchObjectPath(const Vector3d& start,
     const pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>& object_cloud,
-    Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path,
-    bool close_approach)
+    Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path)
 {
   const double max_search_time = 0.2;  // Maximum planning time per attempt
   Vector2d start2d = Vector2d(start(0), start(1));
@@ -598,19 +589,13 @@ bool ExplorationManager::searchObjectPath(const Vector3d& start,
   if (object_pose.x() < -999.0)
     return false;  // Error indicator from findNearestObjectPoint
 
-  // Try different safety distances in order of preference
-  const std::vector<double> distances = close_approach ?
-      std::vector<double>{ 0.25, 0.35, 0.5, 0.70, 0.85 } :
-      std::vector<double>{ 0.5, 0.70, 0.85 };
-  const std::vector<std::string> debug_messages = close_approach ?
-      std::vector<std::string>{ "I'm going closer to the object! dist = 0.25m!",
-        "I'm going closer to the object! dist = 0.35m!",
-        "I'm going to the object! dist = 0.5m!",
-        "I'm going to the object! dist = 0.70m!",
-        "I'm going to the object! dist = 0.85m!" } :
-      std::vector<std::string>{ "I'm going to the object! dist = 0.5m!",
-        "I'm going to the object! dist = 0.70m!",
-        "I'm going to the object! dist = 0.85m!" };
+  // Try different safety distances in order of preference.
+  const std::vector<double> distances = { 0.5, 0.70, 0.85 };
+  const std::vector<std::string> debug_messages = {
+    "I'm going to the object! dist = 0.5m!",
+    "I'm going to the object! dist = 0.70m!",
+    "I'm going to the object! dist = 0.85m!"
+  };
 
   // Attempt path planning with each safety distance
   for (size_t i = 0; i < distances.size(); ++i) {
@@ -622,6 +607,15 @@ bool ExplorationManager::searchObjectPath(const Vector3d& start,
 
   ROS_ERROR("Failed to find object path.");
   return false;
+}
+
+double ExplorationManager::getSemanticValueSafe(const Eigen::Vector2i& idx) const
+{
+  if (!sdf_map_ || !sdf_map_->value_map_)
+    return 0.0;
+  if (!sdf_map_->isInMap(idx))
+    return 0.0;
+  return sdf_map_->value_map_->getValue(idx);
 }
 
 void ExplorationManager::getSortedSemanticFrontiers(const Vector2d& cur_pos,
@@ -638,14 +632,14 @@ void ExplorationManager::getSortedSemanticFrontiers(const Vector2d& cur_pos,
     Vector2i idx;
     sdf_map_->posToIndex(frontier, idx);
     auto nbrs = allNeighbors(idx, 2);  // 5x5 grid neighborhood
-    double value = sdf_map_->value_map_->getValue(idx);
+    double value = getSemanticValueSafe(idx);
 
     // Find maximum semantic value in neighborhood (ignoring occupied cells)
     for (auto& nbr : nbrs) {
       if (sdf_map_->getInflateOccupancy(nbr) == 1 ||
           sdf_map_->getOccupancy(nbr) == SDFMap2D::OCCUPIED)
         continue;
-      value = std::max(value, sdf_map_->value_map_->getValue(nbr));
+      value = std::max(value, getSemanticValueSafe(nbr));
     }
     sem_frontier.semantic_value = value;
 
@@ -679,6 +673,7 @@ void ExplorationManager::calcSemanticFrontierInfo(const vector<SemanticFrontier>
     std::cout << "No semantic frontiers available." << std::endl;
     max_to_mean = 1.0;  // Neutral ratio
     std_dev = 0.0;      // No variation
+    mean = 0.0;
     return;
   }
 
@@ -690,6 +685,11 @@ void ExplorationManager::calcSemanticFrontierInfo(const vector<SemanticFrontier>
     max_value = max(max_value, frontier.semantic_value);
   }
   mean = sum / sem_frontiers.size();
+  if (mean <= 1.0e-9) {
+    max_to_mean = 1.0;
+    std_dev = 0.0;
+    return;
+  }
 
   // Compute standard deviation
   double variance_sum = 0.0;
@@ -727,22 +727,84 @@ bool ExplorationManager::planTrajectory(
 
   // Kinodynamic A* search
   kinoastar_->reset();
-  const int search_result = kinoastar_->search(goal_state, current_state, control);
-  if (search_result != KinoAstar::REACH_END) {
-    ROS_WARN("[ExplorationManager] KinoAstar failed to reach goal, result=%d", search_result);
+  kinoastar_->search(goal_state, current_state, control);
+  kinoastar_->getKinoNode();
+
+  if (!kinoastar_->has_path_ || kinoastar_->flat_trajs_.empty()) {
+    ROS_WARN("[ExplorationManager] KinoAstar did not produce a collision-free frontend trajectory.");
     return false;
   }
-  kinoastar_->getKinoNode();
-  
-  if (kinoastar_->has_path_) {
-    kinoastar_->kinoastarFlatPathPub(kinoastar_->flat_trajs_);
-    gcopter_->minco_plan();
-    std::vector<Trajectory<7, 3>> final_trajes = gcopter_->final_trajes;
-    gcopter_->mincoPathPub(gcopter_->final_trajes, gcopter_->final_singuls);
-    return true;
+
+  kinoastar_->kinoastarFlatPathPub(kinoastar_->flat_trajs_);
+  gcopter_->minco_plan();
+  if (gcopter_->final_trajes.empty() || gcopter_->local_trajectory_.traj.getPieceNum() <= 0) {
+    ROS_WARN("[ExplorationManager] GCopter did not produce a valid optimized trajectory.");
+    return false;
   }
-  
-  return false;
+
+  if (!isTrajectoryCollisionFree(gcopter_->local_trajectory_)) {
+    ROS_ERROR("[ExplorationManager] Trajectory rejected after optimization due to footprint collision.");
+    return false;
+  }
+
+  gcopter_->mincoPathPub(gcopter_->final_trajes, gcopter_->final_singuls);
+  return true;
+}
+
+bool ExplorationManager::isTrajectoryCollisionFree(const LocalTrajectory& local_traj) const
+{
+  if (!kinoastar_) {
+    ROS_WARN("[ExplorationManager] Cannot collision-check trajectory without KinoAstar.");
+    return false;
+  }
+
+  const double total_duration = local_traj.traj.getTotalDuration();
+  if (local_traj.traj.getPieceNum() <= 0 || total_duration <= 1.0e-6) {
+    ROS_WARN("[ExplorationManager] Optimized trajectory is empty during collision check.");
+    return false;
+  }
+
+  const double sample_dt = 0.05;
+  for (double t = 0.0; t <= total_duration + 1.0e-6; t += sample_dt) {
+    const double check_t = std::min(t, total_duration);
+    const Eigen::VectorXd pos = local_traj.traj.getPos(check_t);
+    const Eigen::VectorXd vel = local_traj.traj.getVel(check_t);
+    const Eigen::Vector2d pos2d = pos.head(2);
+    double yaw = 0.0;
+
+    if (vel.head(2).norm() > 1.0e-3) {
+      yaw = std::atan2(vel(1), vel(0));
+    } else {
+      const double t0 = std::max(0.0, check_t - sample_dt);
+      const double t1 = std::min(total_duration, check_t + sample_dt);
+      const Eigen::Vector2d delta =
+          local_traj.traj.getPos(t1).head(2) - local_traj.traj.getPos(t0).head(2);
+      if (delta.norm() > 1.0e-4) {
+        yaw = std::atan2(delta(1), delta(0));
+      }
+    }
+
+    if (kinoastar_->isCollisionPosYaw(pos2d, yaw)) {
+      publishFootprintCollisionMarker(pos2d, check_t);
+      ROS_ERROR("[ExplorationManager] Optimized trajectory footprint collision at (%.2f, %.2f), t=%.2f",
+          pos(0), pos(1), check_t);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+void ExplorationManager::publishFootprintCollisionMarker(
+    const Eigen::Vector2d& collision_pos,
+    double collision_time) const
+{
+  if (!footprint_collision_marker_pub_) {
+    return;
+  }
+
+  footprint_collision_marker_pub_.publish(makeFootprintCollisionPointMarker(
+      collision_pos, collision_time, collision_marker_frame_id_));
 }
 
 }  // namespace apexnav_planner

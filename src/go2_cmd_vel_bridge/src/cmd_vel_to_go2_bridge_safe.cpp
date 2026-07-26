@@ -108,9 +108,13 @@ private:
       if (auto_stand_ && sport_client_)
       {
         ROS_INFO("[go2_cmd_vel_bridge] Sending StandUp...");
-        sport_client_->StandUp();
+        const int32_t stand_ret = sport_client_->StandUp();
+        ROS_INFO("[go2_cmd_vel_bridge] StandUp returned %d.", stand_ret);
         std::this_thread::sleep_for(std::chrono::seconds(1));
-        ROS_INFO("[go2_cmd_vel_bridge] StandUp sent.");
+        ROS_INFO("[go2_cmd_vel_bridge] Sending BalanceStand...");
+        const int32_t balance_ret = sport_client_->BalanceStand();
+        ROS_INFO("[go2_cmd_vel_bridge] BalanceStand returned %d.", balance_ret);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
       }
 #else
       ROS_WARN("[go2_cmd_vel_bridge] Unitree SDK not available - will operate in monitor-only mode");
@@ -175,7 +179,10 @@ private:
         {
 #ifdef UNITREE_AVAILABLE
           if (sport_client_)
-            sport_client_->StopMove();
+          {
+            const int32_t stop_ret = sport_client_->StopMove();
+            ROS_INFO_THROTTLE(1.0, "[go2_cmd_vel_bridge] StopMove returned %d.", stop_ret);
+          }
 #endif
         }
         return;
@@ -197,8 +204,9 @@ private:
 #ifdef UNITREE_AVAILABLE
   if (sport_client_)
   {
-    sport_client_->Move(vx, vy, yaw);
-    ROS_INFO_THROTTLE(1.0, "[go2_cmd_vel_bridge] sent Move vx=%.2f vy=%.2f yaw=%.2f", vx, vy, yaw);
+    const int32_t move_ret = sport_client_->Move(vx, vy, yaw);
+    ROS_INFO_THROTTLE(1.0, "[go2_cmd_vel_bridge] Move returned %d; sent Move vx=%.2f vy=%.2f yaw=%.2f",
+                      move_ret, vx, vy, yaw);
   }
 #endif
       }

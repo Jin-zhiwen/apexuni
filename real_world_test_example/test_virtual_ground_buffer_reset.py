@@ -31,6 +31,7 @@ class VirtualGroundBufferResetTest(unittest.TestCase):
         filter_fn = filter_fn.split("bool MapROS::interpolateLineAtZ", 1)[0]
 
         self.assertEqual(filter_fn.count("map_->inputVirtualGround(under_ground_cloud_2d);"), 1)
+        self.assertIn("}\n  map_->inputVirtualGround(under_ground_cloud_2d);", filter_fn)
 
     def test_virtual_ground_points_do_not_become_occupied_endpoints(self):
         map_ros_source = (

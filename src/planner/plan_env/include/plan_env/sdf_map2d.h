@@ -48,7 +48,8 @@ public:
   void initMap(ros::NodeHandle& nh);
   void inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
       const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
-      vector<Eigen::Vector2i>& free_grids);
+      vector<Eigen::Vector2i>& free_grids,
+      vector<Eigen::Vector2i>* semantic_free_grids = nullptr);
   void inputObjectCloud2D(
       const vector<DetectedObject>& detected_objects, vector<int>& object_cluster_ids);
   void inputVirtualGround(const pcl::PointCloud<pcl::PointXY>::Ptr& points);
@@ -144,8 +145,8 @@ struct MapData2D {
 
   // Probabilistic update tracking
   vector<short> count_hit_, count_miss_, count_hit_and_miss_;  ///< Ray hit/miss counters
-  vector<char> flag_rayend_;                                   ///< Ray endpoint flags
-  char raycast_num_;                                           ///< Current raycast iteration number
+  vector<int> flag_rayend_;                                    ///< Ray endpoint frame stamps
+  int raycast_num_;                                            ///< Current raycast iteration number
   queue<int> cache_voxel_;                                     ///< Queue of voxels pending updates
 
   // Boundary tracking for efficient updates

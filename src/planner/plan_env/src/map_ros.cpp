@@ -44,6 +44,16 @@ void MapROS::init()
   node_.param("map_ros/skip_pixel", skip_pixel_, -1);
   node_.param("map_ros/frame_id", frame_id_, string("world"));
   node_.param("map_ros/virtual_ground_height", virtual_ground_height_, -0.28);
+  node_.param("semantic/object_evidence_enabled", object_value_evidence_enabled_, false);
+  node_.param("semantic/use_raycast_free_grids", semantic_use_raycast_free_grids_, true);
+  node_.param("semantic/visual_free_space_floor", semantic_visual_free_space_floor_, 0.06);
+  node_.param("semantic/object_fov_angle_sigma", object_fov_angle_sigma_, 0.35);
+  node_.param("semantic/object_fov_range_sigma", object_fov_range_sigma_, 0.60);
+  node_.param("semantic/object_fov_max_angle", object_fov_max_angle_, 0.75);
+  node_.param("semantic/object_fov_max_range_error", object_fov_max_range_error_, 1.0);
+  node_.param("semantic/object_fov_weight", object_fov_weight_, 0.70);
+  node_.param("semantic/object_fov_decay_tau", object_fov_decay_tau_, 3.0);
+  node_.param("detector/cloud_max_age", detected_cloud_max_age_, 0.8);
 
   // Handle Habitat simulator vs real-world configuration
   bool is_real_world;
@@ -108,6 +118,8 @@ void MapROS::init()
   // Setup subscribers for object detection and ITM scores
   detected_object_cloud_sub_ = node_.subscribe(
       "/detector/clouds_with_scores", 10, &MapROS::detectedObjectCloudCallback, this);
+  detected_semantic_cloud_sub_ = node_.subscribe("/detector/semantic_clouds_with_scores", 10,
+      &MapROS::detectedSemanticCloudCallback, this);
   itm_score_sub_ = node_.subscribe("/blip2/cosine_score", 10, &MapROS::itmScoreCallback, this);
 
   // Setup synchronized subscribers for depth image and pose data
@@ -123,6 +135,7 @@ void MapROS::init()
   continue_over_depth_count_ = -1;
   itm_score_ = -1.0;
   map_start_time_ = ros::Time::now();
+  last_object_evidence_decay_time_ = map_start_time_;
 }
 
 void MapROS::visCallback(const ros::TimerEvent& e)
@@ -146,6 +159,72 @@ void MapROS::visCallback(const ros::TimerEvent& e)
 void MapROS::itmScoreCallback(const std_msgs::Float64ConstPtr& msg)
 {
   itm_score_ = msg->data;
+}
+
+void MapROS::detectedSemanticCloudCallback(
+    const plan_env::MultipleMasksWithConfidenceConstPtr& msg)
+{
+  if (!object_value_evidence_enabled_)
+    return;
+
+  if (!(msg->confidence_scores.size() == msg->point_clouds.size() &&
+          msg->confidence_scores.size() == msg->label_indices.size())) {
+    ROS_ERROR("[Bug] The semantic MultipleMasksWithConfidence msg is wrong!!!");
+    return;
+  }
+
+  for (int i = 0; i < (int)msg->confidence_scores.size(); i++) {
+    auto confidence_score = msg->confidence_scores[i];
+    if (confidence_score <= 1e-6)
+      continue;
+    if (!isDetectedCloudFresh(msg->point_clouds[i], "semantic"))
+      continue;
+
+    PointCloud3D object_cloud;
+    pcl::fromROSMsg(msg->point_clouds[i], object_cloud);
+    Vector2d object_centroid;
+    if (!computeCloudCentroid2D(object_cloud, object_centroid))
+      continue;
+
+    map_->value_map_->updateObjectFovEvidence(camera_pos_.head<2>(), latest_semantic_value_grids_,
+        object_centroid, confidence_score, object_fov_weight_, object_fov_angle_sigma_,
+        object_fov_range_sigma_, object_fov_max_angle_, object_fov_max_range_error_);
+  }
+}
+
+bool MapROS::isDetectedCloudFresh(
+    const sensor_msgs::PointCloud2& cloud, const std::string& source) const
+{
+  if (detected_cloud_max_age_ <= 0.0 || cloud.header.stamp.isZero())
+    return true;
+
+  const double age = (ros::Time::now() - cloud.header.stamp).toSec();
+  if (age <= detected_cloud_max_age_)
+    return true;
+
+  ROS_WARN_THROTTLE(0.5,
+      "[MapROS] Drop stale detected cloud: source=%s age=%.3f max=%.3f frame=%s",
+      source.c_str(), age, detected_cloud_max_age_, cloud.header.frame_id.c_str());
+  return false;
+}
+
+bool MapROS::computeCloudCentroid2D(const PointCloud3D& cloud, Eigen::Vector2d& centroid) const
+{
+  Eigen::Vector2d sum(0.0, 0.0);
+  int count = 0;
+  for (const auto& object_pt : cloud.points) {
+    Eigen::Vector2d pt(object_pt.x, object_pt.y);
+    if (!map_->isInMap(pt))
+      continue;
+    sum += pt;
+    ++count;
+  }
+
+  if (count <= 0)
+    return false;
+
+  centroid = sum / static_cast<double>(count);
+  return true;
 }
 
 void MapROS::detectedObjectCloudCallback(const plan_env::MultipleMasksWithConfidenceConstPtr& msg)
@@ -188,6 +267,8 @@ void MapROS::detectedObjectCloudCallback(const plan_env::MultipleMasksWithConfid
     // Skip detections rejected by the perception gate; otherwise moving robots
     // accumulate zero-confidence object cells along the trajectory.
     if (confidence_score <= 1e-6)
+      continue;
+    if (!isDetectedCloudFresh(cloud, "object"))
       continue;
 
     // Convert ROS message to PCL point cloud
@@ -381,16 +462,30 @@ void MapROS::processDepthFrame(const sensor_msgs::ImageConstPtr& img,
 
   // Update occupancy grid with filtered depth data
   vector<Eigen::Vector2i> free_grids;
+  vector<Eigen::Vector2i> semantic_free_grids;
+  map_->inputDepthCloud2D(
+      filtered_depth_cloud2d_, raycast_depth_cloud2d_, camera_pos_, free_grids,
+      &semantic_free_grids);
+  // inputDepthCloud2D fills free_grids; dilate afterwards to close small visual
+  // gaps between sparse depth rays in the semantic view-level sector.
   dilateGrids(free_grids, 1);
-  map_->inputDepthCloud2D(filtered_depth_cloud2d_, raycast_depth_cloud2d_, camera_pos_, free_grids);
-  ROS_INFO_THROTTLE(1.0, "[MAP_DEBUG] free_grids=%zu", free_grids.size());
+  ROS_INFO_THROTTLE(1.0, "[MAP_DEBUG] free_grids=%zu, semantic_free_grids=%zu",
+      free_grids.size(), semantic_free_grids.size());
   double process_time = (ros::Time::now() - t1).toSec();
   ROS_INFO_THROTTLE(50.0, "[Calculating Time] Grid Map process time = %.3f s", process_time);
 
   t1 = ros::Time::now();
   // Update semantic value map if ITM score is available
-  if (itm_score_ != -1.0)
-    map_->value_map_->updateValueMap(camera_pos, camera_yaw, free_grids, itm_score_);
+  if (itm_score_ != -1.0) {
+    const vector<Eigen::Vector2i>& semantic_value_grids =
+        semantic_use_raycast_free_grids_ ? free_grids : semantic_free_grids;
+    latest_semantic_value_grids_ = semantic_value_grids;
+    const ros::Time now = ros::Time::now();
+    const double decay_dt = (now - last_object_evidence_decay_time_).toSec();
+    map_->value_map_->decayObjectEvidence(decay_dt, object_fov_decay_tau_);
+    last_object_evidence_decay_time_ = now;
+    map_->value_map_->updateValueMap(camera_pos, camera_yaw, semantic_value_grids, itm_score_);
+  }
   double value_map_time = (ros::Time::now() - t1).toSec();
   ROS_INFO_THROTTLE(50.0, "[Calculating Time] Value Map process time = %.3f s", value_map_time);
 
@@ -598,8 +693,8 @@ void MapROS::filterPointCloudToXY()
         under_ground_cloud_2d->points.push_back(pt_xy);
       }
     }
-    map_->inputVirtualGround(under_ground_cloud_2d);
   }
+  map_->inputVirtualGround(under_ground_cloud_2d);
 
   double filter_time = (ros::Time::now() - t1).toSec();
   ROS_WARN_COND(filter_time > 0.1, "Filter point cloud time maybe a little long = %.3f ms",

@@ -49,6 +49,23 @@ def compensate_frame_age_for_clock_offset(
     return max(0.0, frame_age - clock_offset), clock_offset, True
 
 
+def perception_output_timing_status(
+    raw_frame_age: float,
+    clock_offset: Optional[float],
+    max_output_age: float,
+) -> Tuple[bool, str, float]:
+    if max_output_age <= 0.0:
+        return True, "OK", 0.0
+
+    effective_age = float(raw_frame_age)
+    if clock_offset is not None:
+        effective_age = max(0.0, effective_age - float(clock_offset))
+
+    if effective_age > float(max_output_age):
+        return False, "STALE_PERCEPTION_OUTPUT", effective_age
+    return True, "OK", effective_age
+
+
 def filter_positive_detection_results(
     point_clouds,
     confidence_scores: Iterable[float],

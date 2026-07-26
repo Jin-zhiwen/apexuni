@@ -16,7 +16,6 @@
 // ROS message types
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
-#include <geometry_msgs/Twist.h>
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/Float64.h>
 #include <std_msgs/Int32.h>
@@ -49,24 +48,16 @@ constexpr double REPLAN_DISTANCE_THRESHOLD = 0.5;     // Trigger replan if devia
 constexpr double STUCKING_DISTANCE = 0.05;
 constexpr double REACH_DISTANCE = 0.20;
 constexpr double SOFT_REACH_DISTANCE = 0.45;
-constexpr double LOCAL_DISTANCE = 0.80;
-constexpr double FORWARD_DISTANCE = 0.15;
-constexpr double FORCE_DORMANT_DISTANCE = 0.35;
-constexpr double MIN_SAFE_DISTANCE = 0.15;
-constexpr double MANUAL_FALLBACK_REACH_DISTANCE = 0.10;
-constexpr double EXPLORATION_FALLBACK_REACH_DISTANCE = 0.15;
-constexpr double EXPLORATION_FALLBACK_MAX_DIRECT_DISTANCE = 0.50;
-constexpr double MANUAL_FALLBACK_PROGRESS_EPS = 0.03;
-constexpr double MANUAL_FALLBACK_STUCK_TIMEOUT = 4.0;
 constexpr double LIGHTGLUE_UNVERIFIED_REPLAN_WAIT = 4.0;
 constexpr double LIGHTGLUE_VERIFIED_HOLD_TIME = 0.0;
 constexpr double LIGHTGLUE_FINISH_REVOKE_TIME = 0.0;
-constexpr double DEFAULT_TRACKING_ABORT_DISTANCE = 0.65;
+constexpr double DEFAULT_TRACKING_ABORT_DISTANCE = 0.30;
 
 // Counters / thresholds
 constexpr int MAX_STUCKING_COUNT = 25;
 constexpr int MAX_STUCKING_NEXT_POS_COUNT = 14;
 constexpr int MAX_REPLAN_FAILURES = 3;  // Max consecutive replan failures
+constexpr int MAX_CONSECUTIVE_PLANNING_FAILURES = 3;
 
 // Cost weights
 constexpr double TARGET_WEIGHT = 150.0;
@@ -141,18 +132,7 @@ private:
   // Real-world specific: trajectory control publishers
   ros::Publisher poly_traj_pub_;   // Publish polynomial trajectory
   ros::Publisher stop_pub_;        // Emergency stop signal
-  ros::Publisher manual_cmd_pub_;  // Direct cmd_vel fallback for manual nearby goals
   bool visualize_object_markers_ = false;
-
-  /* Manual goal fallback */
-  bool manual_goal_active_ = false;
-  Eigen::Vector2d manual_goal_pos_ = Eigen::Vector2d::Zero();
-  Eigen::Vector2d manual_goal_dormant_pos_ = Eigen::Vector2d::Zero();
-  double manual_goal_yaw_ = 0.0;
-  bool manual_goal_replan_after_finish_ = false;
-  double manual_goal_best_dist_ = std::numeric_limits<double>::infinity();
-  ros::Time manual_goal_last_progress_time_;
-  double manual_goal_turn_dir_ = 1.0;
 
   /* LightGlue Stop Gate Verification */
   std::string insinav_stop_verified_status_;  // Track LightGlue verification status
@@ -163,6 +143,11 @@ private:
   bool finish_goal_pos_valid_ = false;
   bool lightglue_close_stop_candidate_active_ = false;
   double tracking_abort_distance_ = FSMConstantsReal::DEFAULT_TRACKING_ABORT_DISTANCE;
+  double tracking_replan_odom_distance_ = 0.20;
+  double local_target_max_yaw_error_ = 1.57079632679;
+  bool replan_on_frontier_change_ = false;
+  bool pending_frontier_change_ = false;
+  int planning_failure_count_ = 0;
   
   /* Trajectory execution status */
   // Trajectory state is tracked in fd_->static_state_
@@ -178,11 +163,6 @@ private:
   bool checkNeedReplan();
   bool checkStuckCondition();
   double computePathCost(const std::vector<Eigen::Vector2d>& path);
-  void activateManualFallback(
-      const Eigen::Vector2d& target_pos, double target_yaw, bool replan_after_finish,
-      const Eigen::Vector2d& dormant_pos);
-  double stabilizeFallbackYawError(double yaw_error);
-  void stepManualGoalFallback();
 
   /* Helper functions */
   bool updateFrontierAndObject();

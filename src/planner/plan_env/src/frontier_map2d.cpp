@@ -19,12 +19,19 @@ FrontierMap2D::FrontierMap2D(const SDFMap2D::Ptr& sdf_map, ros::NodeHandle& nh)
   // Initialize core mapping infrastructure
   this->sdf_map_ = sdf_map;
   int voxel_num = sdf_map_->getVoxelNum();
+  have_latest_sensor_pos_ = false;
+  latest_sensor_pos_.setZero();
+  have_persistent_exclusion_zone_ = false;
+  persistent_exclusion_center_.setZero();
+  persistent_exclusion_radius_ = 0.0;
 
   // Allocate and initialize frontier state flags for all grid cells
   frontier_flag_ = vector<char>(voxel_num, NONE);
   fill(frontier_flag_.begin(), frontier_flag_.end(), NONE);
 
   // Load exploration parameters from ROS parameter server
+  nh.param("is_real_world", is_real_world_, false);
+  nh.param("frontier/real_world_exclusion_radius", real_world_exclusion_radius_, 0.0);
   nh.param("frontier/cluster_min", cluster_min_, -1);
   nh.param("frontier/cluster_size_xy", cluster_size_xy_, -1.0);
   nh.param("frontier/min_contain_unknown", min_contain_unknown_, 50);
@@ -266,6 +273,8 @@ bool FrontierMap2D::splitHorizontally(const Frontier2D& frontier, list<Frontier2
 bool FrontierMap2D::dormantSeenFrontiers(Vector2d sensor_pos, double sensor_yaw)
 {
   bool change_flag = false;
+  latest_sensor_pos_ = sensor_pos;
+  have_latest_sensor_pos_ = true;
 
   // Configure perception utilities with current sensor pose
   percep_utils_->setPose(sensor_pos, sensor_yaw);
@@ -359,6 +368,51 @@ void FrontierMap2D::computeFrontierInfo(Frontier2D& ftr)
 
   // Compute final centroid as mean position of all cluster cells
   ftr.average_ /= double(ftr.cells_.size());
+}
+
+void FrontierMap2D::setPersistentExclusionZone(const Vector2d& center)
+{
+  if (!is_real_world_ || real_world_exclusion_radius_ <= 1e-6) {
+    have_persistent_exclusion_zone_ = false;
+    persistent_exclusion_radius_ = 0.0;
+    return;
+  }
+
+  persistent_exclusion_center_ = center;
+  persistent_exclusion_radius_ = real_world_exclusion_radius_;
+  have_persistent_exclusion_zone_ = true;
+
+  ROS_WARN("[FrontierMap2D] Persistent exploration exclusion zone set: center=(%.2f, %.2f), radius=%.2f",
+      persistent_exclusion_center_.x(), persistent_exclusion_center_.y(),
+      persistent_exclusion_radius_);
+}
+
+bool FrontierMap2D::shouldExcludeCellsNearZone(
+    const vector<Vector2d>& cells, bool zone_active, const Vector2d& zone_center,
+    double zone_radius)
+{
+  if (!zone_active || zone_radius <= 1e-6) {
+    return false;
+  }
+
+  for (const auto& cell : cells) {
+    if ((cell - zone_center).norm() < zone_radius) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool FrontierMap2D::shouldExcludeFrontierNearRobot(const Frontier2D& frontier) const
+{
+  if (shouldExcludeCellsNearZone(frontier.cells_, have_persistent_exclusion_zone_,
+          persistent_exclusion_center_, persistent_exclusion_radius_)) {
+    return true;
+  }
+
+  return shouldExcludeCellsNearZone(frontier.cells_,
+      is_real_world_ && have_latest_sensor_pos_, latest_sensor_pos_, real_world_exclusion_radius_);
 }
 
 bool FrontierMap2D::isAnyFrontierChanged()
@@ -511,6 +565,9 @@ void FrontierMap2D::getFrontiers(
 
   // Extract cluster data from all active frontiers
   for (auto frontier : frontiers_) {
+    if (shouldExcludeFrontierNearRobot(frontier)) {
+      continue;
+    }
     clusters.push_back(frontier.cells_);
     averages.push_back(frontier.average_);
   }
@@ -522,6 +579,9 @@ void FrontierMap2D::getDormantFrontiers(
   clusters.clear();
   averages.clear();
   for (auto frontier : dormant_frontiers_) {
+    if (shouldExcludeFrontierNearRobot(frontier)) {
+      continue;
+    }
     clusters.push_back(frontier.cells_);
     averages.push_back(frontier.average_);
   }

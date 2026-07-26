@@ -144,6 +144,7 @@ private:
 
   void getSampleTraj();
   void getTrajsWithTime();
+  void rejectSampledCollisionTrajectory(const Eigen::Vector2d& pos);
   double evaluateDistance(const Eigen::Vector2d& state1, const Eigen::Vector2d& state2);
   double evaluateDuration(const double& length, const double& startV, const double& endV);
   double evaluateLength(const double& curt, const double& locallength, const double& localtime,
@@ -185,6 +186,7 @@ private:
   double non_siguav_;          // minimum speed considered non-zero
   double collision_interval_;  // collision checking interval
   bool unknown_as_collision_ = true;
+  double hard_collision_padding_ = 0.0;
 
   // Commented parameters exist in the original but are unused here
   double max_vel_;

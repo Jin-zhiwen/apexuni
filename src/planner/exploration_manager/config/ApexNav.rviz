@@ -171,6 +171,14 @@ Visualization Manager:
             tsp_tour: true
           Queue Size: 100
           Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /planning_vis/footprint_collision
+          Name: footprint_collision
+          Namespaces:
+            footprint_collision: true
+          Queue Size: 10
+          Value: true
       Enabled: true
       Name: Exploration
     - Class: rviz/Group
@@ -522,9 +530,9 @@ Visualization Manager:
           Enabled: true
           Invert Rainbow: false
           Max Color: 204; 0; 0
-          Max Intensity: 0.3499999940395355
+          Max Intensity: 1
           Min Color: 250; 255; 203
-          Min Intensity: 0.10000000149011612
+          Min Intensity: 0
           Name: semantic_score_map
           Position Transformer: XYZ
           Queue Size: 10

@@ -26,6 +26,10 @@ public:
     nh.param("need_init", need_init, false);
     nh.param("max_correction_vel", max_correction_vel_, 0.6);
     nh.param("max_correction_omega", max_correction_omega_, 1.2);
+    nh.param("tracking_slowdown_error", tracking_slowdown_error_, 0.20);
+    nh.param("tracking_stop_error", tracking_stop_error_, 0.55);
+    nh.param("tracking_min_speed_scale", tracking_min_speed_scale_, 0.25);
+    nh.param("tracking_min_effective_vx", tracking_min_effective_vx_, 0.22);
     traj_sub_ = nh_.subscribe("trajectory", 10, &TrajectoryServer::polyTrajCallback, this);
     odom_sub_ = nh_.subscribe("odometry", 10, &TrajectoryServer::odometryCallback, this);
     stop_sub_ = nh_.subscribe("/traj_server/stop", 10, &TrajectoryServer::stopCallback, this);
@@ -178,6 +182,9 @@ public:
     ros::Time time_now = ros::Time::now();
     double t_stop = (time_now - start_time_).toSec();
     traj_duration_ = min(t_stop, traj_duration_);
+    receive_traj_ = false;
+
+    publishZeroVelocity();
   }
 
   void targetAngleCallback(const std_msgs::Float32ConstPtr& msg)
@@ -216,17 +223,16 @@ public:
 
     if (elapsed_time > traj_duration_) {
       // Trajectory finished, stop publishing
-      geometry_msgs::Twist twist_msg;
-      twist_msg.linear.x = 0.0;
-      twist_msg.angular.z = 0.0;
-      vel_cmd_pub_.publish(twist_msg);  // Publish zero velocity
+      publishZeroVelocity();            // Publish zero velocity
       receive_traj_ = false;            // Reset flag so that no more commands are published
       return;
     }
 
     if (use_mpc_) {
-      Eigen::Vector3d pos = traj_->getPos(elapsed_time);
-      Eigen::Vector3d vel = traj_->getVel(elapsed_time);
+      const Eigen::Vector3d current_desire_pos = traj_->getPos(elapsed_time);
+      const Eigen::Vector3d current_desire_vel = traj_->getVel(elapsed_time);
+      Eigen::Vector3d pos = current_desire_pos;
+      Eigen::Vector3d vel = current_desire_vel;
 
       Eigen::Vector3d ref;
       ref(0) = pos(0);
@@ -247,23 +253,22 @@ public:
       mpc_controller_->setOdom(
           Eigen::Vector4d(odom_pos_(0), odom_pos_(1), odom_yaw_, odom_linear_vel_.head(2).norm()));
       cmd = mpc_controller_->calCmd(xref_);
+      const double track_err =
+          Eigen::Vector2d(odom_pos_(0) - current_desire_pos(0),
+              odom_pos_(1) - current_desire_pos(1)).norm();
       geometry_msgs::Twist twist_msg;
-      twist_msg.linear.x = cmd(0);
+      twist_msg.linear.x = applyTrackingErrorSpeedLimit(cmd(0), track_err);
       twist_msg.linear.y = 0.0;
       twist_msg.linear.z = 0.0;
       twist_msg.angular.x = 0.0;
       twist_msg.angular.y = 0.0;
-      twist_msg.angular.z = cmd(1);
+      twist_msg.angular.z = applyTrackingErrorYawLimit(cmd(1), track_err);
       vel_cmd_pub_.publish(twist_msg);
-      const double track_err =
-          Eigen::Vector2d(odom_pos_(0) - pos(0), odom_pos_(1) - pos(1)).norm();
       ROS_INFO_THROTTLE(1.0, "[traj_server] cmd_vel vx=%.2f wz=%.2f track_err=%.2f",
           twist_msg.linear.x, twist_msg.angular.z, track_err);
 
       // Publish current desired pose
       geometry_msgs::Pose desire_pose;
-      Eigen::Vector3d current_desire_pos = traj_->getPos(elapsed_time);
-      Eigen::Vector3d current_desire_vel = traj_->getVel(elapsed_time);
       double current_desire_yaw = atan2(current_desire_vel(1), current_desire_vel(0));
 
       desire_pose.position.x = current_desire_pos(0);
@@ -282,8 +287,10 @@ public:
     }
     else {
       // Non-MPC branch removed: use MPC controller to compute commands here as well.
-      Eigen::Vector3d pos = traj_->getPos(elapsed_time);
-      Eigen::Vector3d vel = traj_->getVel(elapsed_time);
+      const Eigen::Vector3d current_desire_pos = traj_->getPos(elapsed_time);
+      const Eigen::Vector3d current_desire_vel = traj_->getVel(elapsed_time);
+      Eigen::Vector3d pos = current_desire_pos;
+      Eigen::Vector3d vel = current_desire_vel;
 
       Eigen::Vector3d ref;
       ref(0) = pos(0);
@@ -304,23 +311,22 @@ public:
       mpc_controller_->setOdom(
           Eigen::Vector4d(odom_pos_(0), odom_pos_(1), odom_yaw_, odom_linear_vel_.head(2).norm()));
       cmd = mpc_controller_->calCmd(xref_);
+      const double track_err =
+          Eigen::Vector2d(odom_pos_(0) - current_desire_pos(0),
+              odom_pos_(1) - current_desire_pos(1)).norm();
       geometry_msgs::Twist twist_msg;
-      twist_msg.linear.x = cmd(0);
+      twist_msg.linear.x = applyTrackingErrorSpeedLimit(cmd(0), track_err);
       twist_msg.linear.y = 0.0;
       twist_msg.linear.z = 0.0;
       twist_msg.angular.x = 0.0;
       twist_msg.angular.y = 0.0;
-      twist_msg.angular.z = cmd(1);
+      twist_msg.angular.z = applyTrackingErrorYawLimit(cmd(1), track_err);
       vel_cmd_pub_.publish(twist_msg);
-      const double track_err =
-          Eigen::Vector2d(odom_pos_(0) - pos(0), odom_pos_(1) - pos(1)).norm();
       ROS_INFO_THROTTLE(1.0, "[traj_server] cmd_vel vx=%.2f wz=%.2f track_err=%.2f",
           twist_msg.linear.x, twist_msg.angular.z, track_err);
 
       // Publish current desired pose
       geometry_msgs::Pose desire_pose;
-      Eigen::Vector3d current_desire_pos = traj_->getPos(elapsed_time);
-      Eigen::Vector3d current_desire_vel = traj_->getVel(elapsed_time);
       double current_desire_yaw = atan2(current_desire_vel(1), current_desire_vel(0));
 
       desire_pose.position.x = current_desire_pos(0);
@@ -336,6 +342,14 @@ public:
 
       current_desire_pub_.publish(desire_pose);
     }
+  }
+
+  void publishZeroVelocity()
+  {
+    geometry_msgs::Twist twist_msg;
+    twist_msg.linear.x = 0.0;
+    twist_msg.angular.z = 0.0;
+    vel_cmd_pub_.publish(twist_msg);
   }
 
   void executeRotationToTarget()
@@ -389,6 +403,48 @@ public:
           odom_yaw_ * 180.0 / M_PI, target_yaw_ * 180.0 / M_PI, yaw_error * 180.0 / M_PI,
           angular_velocity);
     }
+  }
+
+  double applyTrackingErrorSpeedLimit(double commanded_vx, double track_err) const
+  {
+    double limited_vx = std::max(-max_correction_vel_, std::min(max_correction_vel_, commanded_vx));
+
+    if (track_err <= tracking_slowdown_error_) {
+      return limited_vx;
+    }
+
+    if (track_err >= tracking_stop_error_) {
+      return 0.0;
+    }
+
+    const double raw_scale =
+        (tracking_stop_error_ - track_err) /
+        std::max(1.0e-6, tracking_stop_error_ - tracking_slowdown_error_);
+    const double speed_scale = std::max(tracking_min_speed_scale_, raw_scale);
+    limited_vx *= speed_scale;
+    if (std::fabs(limited_vx) > 1.0e-3 && std::fabs(limited_vx) < tracking_min_effective_vx_) {
+      limited_vx = std::copysign(tracking_min_effective_vx_, limited_vx);
+    }
+    return limited_vx;
+  }
+
+  double applyTrackingErrorYawLimit(double commanded_wz, double track_err) const
+  {
+    double limited_wz = std::max(-max_correction_omega_, std::min(max_correction_omega_, commanded_wz));
+
+    if (track_err <= tracking_slowdown_error_) {
+      return limited_wz;
+    }
+
+    if (track_err >= tracking_stop_error_) {
+      return 0.0;
+    }
+
+    const double raw_scale =
+        (tracking_stop_error_ - track_err) /
+        std::max(1.0e-6, tracking_stop_error_ - tracking_slowdown_error_);
+    const double yaw_scale = std::max(0.10, raw_scale);
+    return limited_wz * yaw_scale;
   }
 
   void publishRobotMarker()
@@ -530,6 +586,8 @@ private:
   double rotation_accum_;  // accumulated absolute yaw change (rad)
   double last_odom_yaw_;   // last odom yaw used for accumulation
   double max_correction_vel_, max_correction_omega_;
+  double tracking_slowdown_error_, tracking_stop_error_, tracking_min_speed_scale_;
+  double tracking_min_effective_vx_;
 };
 
 int main(int argc, char** argv)

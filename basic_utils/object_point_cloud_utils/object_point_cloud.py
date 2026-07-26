@@ -40,6 +40,8 @@ def get_object_point_cloud(cfg, observations, object_masks_list):
     hfov = cfg_depth_sensor["hfov"]
     height = cfg_depth_sensor["height"]
     width = cfg_depth_sensor["width"]
+    cloud_stamp = observations.get("stamp", None)
+    cloud_frame_id = observations.get("frame_id", "world")
     fx = width / (2 * math.tan(hfov * np.pi / 360.0))
     fy = height / (2 * math.tan(hfov / width * height * np.pi / 360.0))
     for object_mask in object_masks_list:
@@ -64,7 +66,7 @@ def get_object_point_cloud(cfg, observations, object_masks_list):
         obj_point_cloud = np.concatenate(
             (obj_point_cloud, within_range[:, None]), axis=1
         )
-        pc2 = convert_to_pointcloud2(obj_point_cloud)
+        pc2 = convert_to_pointcloud2(obj_point_cloud, stamp=cloud_stamp, frame_id=cloud_frame_id)
         obj_point_cloud_list.append(pc2)
     return obj_point_cloud_list
 
@@ -119,7 +121,7 @@ def get_random_subarray(points: np.ndarray, size: int) -> np.ndarray:
     return points[indices]
 
 
-def convert_to_pointcloud2(obj_point_cloud):
+def convert_to_pointcloud2(obj_point_cloud, stamp=None, frame_id="world"):
     """
     Convert numpy point cloud to ROS PointCloud2 message
     
@@ -133,8 +135,8 @@ def convert_to_pointcloud2(obj_point_cloud):
 
     # Create PointCloud2 message
     pc2 = PointCloud2()
-    pc2.header.stamp = rospy.Time.now()
-    pc2.header.frame_id = "world"
+    pc2.header.stamp = stamp if stamp is not None else rospy.Time.now()
+    pc2.header.frame_id = frame_id
     pc2.height = 1
     pc2.width = obj_point_cloud.shape[0]
     pc2.fields = [

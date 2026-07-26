@@ -93,6 +93,7 @@ struct FSMParam {
     replan_traj_end_threshold_ = 1.0;
     replan_frontier_change_delay_ = 0.5;
     replan_timeout_ = 2.0;
+    local_target_distance_ = 4.0;
 
     const double step_length = 0.25;
     const double angle_increment = M_PI / 6;
@@ -110,6 +111,7 @@ struct FSMParam {
   double replan_traj_end_threshold_;
   double replan_frontier_change_delay_;
   double replan_timeout_;
+  double local_target_distance_;
 };
 
 struct ExplorationData {

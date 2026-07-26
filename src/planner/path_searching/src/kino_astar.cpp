@@ -3,6 +3,24 @@
 #define uint unsigned int
 
 namespace apexnav_planner {
+namespace {
+
+std::vector<double> sampleInitialArcInputs(
+    double grid_interval, double step_arc, bool start_nearly_static)
+{
+  const double base_arc = start_nearly_static ?
+      std::max(grid_interval, 0.5 * step_arc) :
+      std::max(grid_interval, 1e-6);
+
+  std::vector<double> arcs;
+  for (double arc = base_arc; arc <= 2.0 * base_arc + 1e-6; arc += base_arc) {
+    arcs.push_back(arc);
+  }
+  return arcs;
+}
+
+}  // namespace
+
 void KinoAstar::init()
 {
   std::string node_name = ros::this_node::getName();
@@ -48,6 +66,8 @@ void KinoAstar::init()
   nh_.param<bool>(
       ros::this_node::getName() + "/kinoastar/unknown_as_collision",
       unknown_as_collision_, true);
+  nh_.param<double>(
+      ros::this_node::getName() + "/hard_collision_padding", hard_collision_padding_, 0.0);
   nh_.param<double>(ros::this_node::getName() + "/wheel_base", wheel_base_, 0.8);
   max_steer_ = std::atan(wheel_base_ * max_cur_);
   nh_.param<double>(ros::this_node::getName() + "/length", length_, 1);
@@ -55,6 +75,9 @@ void KinoAstar::init()
   nh_.param<double>(ros::this_node::getName() + "/height", height_, 1);
   nh_.param<double>(ros::this_node::getName() + "/odom_to_center_x", odom_to_center_x_, 0.0);
   nh_.param<double>(ros::this_node::getName() + "/odom_to_center_y", odom_to_center_y_, 0.0);
+
+  ROS_INFO("[KinoAstar] forward-only initial arc sampling active: step_arc=%.2f, grid_interval=%.2f, max_steer=%.2f rad, yaw_resolution=%.2f rad",
+      step_arc_, grid_interval_, max_steer_, yaw_resolution_);
 
   // SE(2) motion model (x,y,yaw), suitable for nonholonomic constraints with limited turning radius
   shotptr_s.push_back(std::make_shared<ompl::base::DubinsStateSpace>(0.2));
@@ -212,23 +235,32 @@ int KinoAstar::search(
     // (initial state may have forward velocity). Obtain inputs.
     // input[0] is steering angle; input[1] is displacement
     if (!initsearch) {
-      std::vector<double> initial_directions;
-      if (std::fabs(start_state_[4]) <= non_siguav_) {
-        // A real robot often has to back away from a wall before it can steer out.
-        initial_directions = { 1.0, -1.0 };
-      }
-      else {
-        initial_directions = { start_state_[4] < 0.0 ? -1.0 : 1.0 };
-      }
-      for (double direction : initial_directions) {
-        for (double arc = grid_interval_; arc <= 2 * grid_interval_ + 1e-3;
-            arc += grid_interval_) {
-          for (double steer = -max_steer_; steer <= max_steer_ + 1e-3;
-              steer += res * max_steer_ * 1.0) {
-            ctrl_input << steer, direction * arc, 0.0;
-            inputs.push_back(ctrl_input);
-          }
+      const bool start_nearly_static = std::fabs(start_state_[4]) <= non_siguav_;
+      const auto initial_arcs =
+          sampleInitialArcInputs(grid_interval_, step_arc_, start_nearly_static);
+      for (double arc : initial_arcs) {
+        if (!start_nearly_static &&
+            ((start_state_[4] < 0.0 && arc > 0.0) || (start_state_[4] > 0.0 && arc < 0.0))) {
+          continue;
         }
+        for (double steer = -max_steer_; steer <= max_steer_ + 1e-3;
+            steer += res * max_steer_ * 1.0) {
+          ctrl_input << steer, arc, 0.0;
+          inputs.push_back(ctrl_input);
+        }
+      }
+      if (inputs.empty()) {
+        ROS_WARN("KinoAstar: no initial inputs generated (start_vel=%.3f, grid=%.3f, step_arc=%.3f)",
+            start_state_[4], grid_interval_, step_arc_);
+      }
+      else if (start_nearly_static) {
+        ROS_WARN_THROTTLE(1.0,
+            "KinoAstar: static-start forward sampling enabled (inputs=%zu, first_arc=%.2f, last_arc=%.2f)",
+            inputs.size(), initial_arcs.front(), initial_arcs.back());
+      }
+      if (inputs.empty()) {
+        std::cout << "open set empty, no path." << std::endl;
+        return NO_PATH;
       }
       initsearch = true;
     }
@@ -346,7 +378,6 @@ void KinoAstar::getKinoNode()
 {
   if (!has_path_)
     return;
-  ros::Time current = ros::Time::now();
   getSampleTraj();
   getTrajsWithTime();
 }
@@ -431,6 +462,15 @@ void KinoAstar::getTrajsWithTime()
   shot_timeList.clear();
   shotindex.clear();
   shot_SList.clear();
+
+  if (sample_traj_.size() < 2) {
+    ROS_ERROR("KinoAstar: sampled trajectory too short, reject frontend trajectory.");
+    has_path_ = false;
+    is_shot_succ_ = false;
+    flat_trajs_.clear();
+    totalTrajTime = 0.0;
+    return;
+  }
 
   double tmp_length = 0;
   // Determine forward direction by comparing the vector between two points with the local heading
@@ -536,19 +576,22 @@ void KinoAstar::getTrajsWithTime()
           double px = (l1 / l * localTraj[k] + l2 / l * localTraj[k + 1])[0];
           double py = (l1 / l * localTraj[k] + l2 / l * localTraj[k + 1])[1];
           double yaw = (l1 / l * localTraj[k] + l2 / l * localTraj[k + 1])[2];
-          bool occ = isCollisionPosYaw(Eigen::Vector2d(px, py), yaw);
-          if (occ)
-            ROS_ERROR("isCollisionPosYaw occ!!!!!!!!  position: %f %f", px, py);
-
           if (fabs(localTraj[k + 1][2] - localTraj[k][2]) >= M_PI) {
             if (localTraj[k + 1][2] <= 0)
               yaw = l1 / l * localTraj[k][2] + l2 / l * (localTraj[k + 1][2] + 2 * M_PI);
             else if (localTraj[k][2] <= 0)
               yaw = l1 / l * (localTraj[k][2] + 2 * M_PI) + l2 / l * localTraj[k + 1][2];
           }
+          yaw = normalizeAngle(yaw);
 
-          traj_pts.emplace_back(px, py, sampletime_, 0.0);
-          thetas.push_back(yaw);
+          bool occ = isCollisionPosYaw(Eigen::Vector2d(px, py), yaw);
+          if (occ) {
+            rejectSampledCollisionTrajectory(Eigen::Vector2d(px, py));
+            return;
+          }
+
+	          traj_pts.emplace_back(px, py, sampletime_, 0.0);
+	          thetas.push_back(yaw);
           tmparc -= evaluateDistance(localTraj[k].head(2), localTraj[k + 1].head(2));
           break;
         }
@@ -576,6 +619,20 @@ void KinoAstar::getTrajsWithTime()
   // compute total time
   totalTrajTime = 0;
   for (uint i = 0; i < shot_timeList.size(); i++) totalTrajTime += shot_timeList[i];
+}
+
+void KinoAstar::rejectSampledCollisionTrajectory(const Eigen::Vector2d& pos)
+{
+  ROS_ERROR("isCollisionPosYaw occ!!!!!!!!  position: %f %f", pos.x(), pos.y());
+  ROS_ERROR("KinoAstar: reject sampled trajectory because a footprint collision was found.");
+  has_path_ = false;
+  is_shot_succ_ = false;
+  flat_trajs_.clear();
+  shot_lengthList.clear();
+  shot_timeList.clear();
+  shotindex.clear();
+  shot_SList.clear();
+  totalTrajTime = 0.0;
 }
 
 double KinoAstar::evaluateDistance(const Eigen::Vector2d& state1, const Eigen::Vector2d& state2)
@@ -695,10 +752,37 @@ bool KinoAstar::isCollisionPosYaw(const Eigen::Vector2d& pos, const double& yaw)
 
 bool KinoAstar::checkCollision(double x, double y, double z)
 {
+  static const std::vector<Eigen::Vector2d> sample_offsets = {
+    Eigen::Vector2d::Zero(),
+    Eigen::Vector2d(1.0, 0.0),
+    Eigen::Vector2d(-1.0, 0.0),
+    Eigen::Vector2d(0.0, 1.0),
+    Eigen::Vector2d(0.0, -1.0),
+    Eigen::Vector2d(M_SQRT1_2, M_SQRT1_2),
+    Eigen::Vector2d(-M_SQRT1_2, M_SQRT1_2),
+    Eigen::Vector2d(M_SQRT1_2, -M_SQRT1_2),
+    Eigen::Vector2d(-M_SQRT1_2, -M_SQRT1_2),
+  };
+
   Eigen::Vector2d pos(x, y);
-  const int occupancy = map_->getOccupancy(pos);
-  return occupancy == SDFMap2D::OCCUPIED ||
-      (unknown_as_collision_ && occupancy == SDFMap2D::UNKNOWN);
+  for (const auto& offset : sample_offsets) {
+    Eigen::Vector2d query_pos = pos;
+    if (hard_collision_padding_ > 1e-6) {
+      query_pos += hard_collision_padding_ * offset;
+    }
+
+    if (!map_->isInMap(query_pos)) {
+      return true;
+    }
+
+    const int occupancy = map_->getOccupancy(query_pos);
+    if (occupancy == SDFMap2D::OCCUPIED ||
+        (unknown_as_collision_ && occupancy == SDFMap2D::UNKNOWN)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 double KinoAstar::getHeu(const Eigen::VectorXd& x1, const Eigen::VectorXd& x2)
@@ -751,11 +835,20 @@ double KinoAstar::computeShotTraj(const Eigen::Vector3d& state1, const Eigen::Ve
   std::vector<double> reals;
 
   len = shotptr_->distance(from(), to());
+  path_list.clear();
+  if (len <= 1.0e-6) {
+    path_list.push_back(Eigen::Vector3d(state2[0], state2[1], state2[2]));
+    return 0.0;
+  }
   double sum_T = len / max_vel_;
 
-  // sample to obtain intermediate point
-  for (double l = 0.0; l <= len; l += checkl_) {
-    shotptr_->interpolate(from(), to(), l / len, s());
+  const double dense_check_step = std::max(0.01,
+      std::min(checkl_, std::min(0.5 * collision_interval_, 0.5 * sampletime_ * max_vel_)));
+
+  // Sample densely enough to match the later time-parameterized trajectory safety checks.
+  for (double l = 0.0; l <= len + 1.0e-6; l += dense_check_step) {
+    const double clamped_l = std::min(l, len);
+    shotptr_->interpolate(from(), to(), clamped_l / len, s());
     reals = s.reals();
     path_list.push_back(Eigen::Vector3d(reals[0], reals[1], reals[2]));
   }
@@ -919,17 +1012,34 @@ void KinoAstar::getFlatState(const double& x, const double& y, const double& ang
 // output x y yaw theta
 Eigen::Vector4d KinoAstar::evaluatePos(const double& input_t)
 {
+  if (sample_traj_.empty() || shot_timeList.empty() || shotindex.size() < 2) {
+    ROS_ERROR("In evaluatePos, empty trajectory data");
+    return Eigen::Vector4d::Zero();
+  }
+
   // ensure t > 0 and < totalTrajTime
   double t = input_t;
   if (t < 0 || t > totalTrajTime) {
-    ROS_ERROR("In evaluatePos, t<0 || t>totalTrajTime");
+    constexpr double kTimeBoundaryEps = 1.0e-6;
+    const double time_diff =
+        t < 0.0 ? -t : t - totalTrajTime;
+    if (time_diff <= kTimeBoundaryEps) {
+      ROS_WARN_THROTTLE(1.0,
+          "In evaluatePos, tiny time boundary overrun clamped: input_t=%.9f, totalTrajTime=%.9f, diff=%.9f",
+          input_t, totalTrajTime, time_diff);
+    }
+    else {
+      ROS_ERROR(
+          "In evaluatePos, t out of range: input_t=%.9f, totalTrajTime=%.9f, diff=%.9f",
+          input_t, totalTrajTime, time_diff);
+    }
     t = std::min<double>(std::max<double>(0, t), totalTrajTime);
   }
   double start_vel = fabs(start_state_[4]);
   double end_vel = fabs(end_state_[4]);
   int index = -1;
   double tmpT = 0;
-  double CutTime;
+  double CutTime = 0.0;
   // locate the local traj: find the segment containing current time
   for (uint i = 0; i < shot_timeList.size(); i++) {
     tmpT += shot_timeList[i];
@@ -939,12 +1049,21 @@ Eigen::Vector4d KinoAstar::evaluatePos(const double& input_t)
       break;
     }
   }
+  if (index < 0) {
+    ROS_ERROR("In evaluatePos, no segment contains requested time");
+    return sample_traj_.back();
+  }
+  if (index >= static_cast<int>(shot_lengthList.size()) ||
+      index + 1 >= static_cast<int>(shotindex.size())) {
+    ROS_ERROR("In evaluatePos, inconsistent trajectory segment data");
+    return sample_traj_.back();
+  }
   // find the start and end velocities for the segment
   double initv = non_siguav_, finv = non_siguav_;
   if (index == 0) {
     initv = start_vel;
   }
-  if (index == shot_lengthList.size() - 1)
+  if (static_cast<size_t>(index) == shot_lengthList.size() - 1)
     finv = end_vel;
   // find the time and length for the segment
   double localtime = shot_timeList[index];
@@ -952,9 +1071,16 @@ Eigen::Vector4d KinoAstar::evaluatePos(const double& input_t)
   // find two turning points from the turning-point array to select two points
   int front = shotindex[index];
   int back = shotindex[index + 1];
+  if (front < 0 || back < front || static_cast<size_t>(back) >= sample_traj_.size()) {
+    ROS_ERROR("In evaluatePos, invalid trajectory segment index");
+    return sample_traj_.back();
+  }
   // select the trajectory segment that contains t; initial and final velocities at endpoints
   std::vector<Eigen::Vector4d> localTraj;
   localTraj.assign(sample_traj_.begin() + front, sample_traj_.begin() + back + 1);
+  if (localTraj.size() < 2) {
+    return localTraj.back();
+  }
   // find the nearest point — compute path length at this time, find nearest point and interpolate
   // to get current state
   double arclength = evaluateLength(CutTime, locallength, localtime, initv, finv);
@@ -964,11 +1090,14 @@ Eigen::Vector4d KinoAstar::evaluatePos(const double& input_t)
     if (tmparc >= arclength) {
       double l1 = tmparc - arclength;
       double l = evaluateDistance(localTraj[i].head(2), localTraj[i + 1].head(2));
+      if (l <= 1.0e-9) {
+        return localTraj[i + 1];
+      }
       double l2 = l - l1;  // l2
       // directly interpolate to obtain the state; yaw angle needs special handling
       Eigen::Vector4d state = l1 / l * localTraj[i] + l2 / l * localTraj[i + 1];
       if (fabs(localTraj[i + 1][2] - localTraj[i][2]) >= M_PI) {
-        double normalize_yaw;
+        double normalize_yaw = state[2];
         if (localTraj[i + 1][2] <= 0) {
           normalize_yaw = l1 / l * localTraj[i][2] + l2 / l * (localTraj[i + 1][2] + 2 * M_PI);
         }
@@ -979,6 +1108,10 @@ Eigen::Vector4d KinoAstar::evaluatePos(const double& input_t)
       }
       ////  special handling for joint angles
       // std::cout<<"---------------------------------------------------"<<index<<"-----------------------------"<<std::endl;
+      if (static_cast<size_t>(index) >= flat_trajs_.size()) {
+        ROS_ERROR("In evaluatePos, flat trajectory index out of range");
+        return state;
+      }
       FlatTrajData kino_traj = flat_trajs_.at(index);
       std::vector<Eigen::Vector4d> pts = kino_traj.traj_pts;
       double sumt = 0.0;

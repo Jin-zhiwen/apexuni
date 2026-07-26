@@ -1,7 +1,7 @@
 ######################## car model ########################
 # Physical parameters
-max_vel: 0.60
-max_acc: 1.2
+max_vel: 0.25
+max_acc: 0.5
 max_domega: 1.0
 zoom_omega: 0.30
 max_cur: 6.0
@@ -13,8 +13,8 @@ wheel_base: 0.14
 # Collision proxy for Unitree Go2. Keep the body envelope compact for indoor
 # exploration; this matches the earlier real-world tuning that allowed the robot
 # to move through narrow passages.
-length: 0.40
-width: 0.16
+length: 0.50
+width: 0.30
 height: 0.40
 
 # Offset the collision box slightly backward from the odom/body origin so goals
@@ -56,6 +56,10 @@ sampletime: 0.1
 # Collision check sampling interval; match map resolution to avoid missing thin obstacles.
 collision_interval: 0.05
 
+# Hard collision uses the true robot footprint over raw occupancy plus a safety
+# skin for gait sway, VIO drift, and door-frame depth noise.
+hard_collision_padding: 0.03
+
 ######################## global planning ########################
 time_weight: 15.0
 
@@ -71,6 +75,7 @@ sparseResolution: 8
 # Backend sampling time
 timeResolution: 1
 
-# Safety distance for trajectory optimization. The ESDF already includes
-# obstacles_inflation, and hard collision is still enforced by footprint checks.
-safe_dist: 0.05
+# Safety distance for trajectory optimization. With algorithm_traj.xml's 0.08 m
+# map inflation, 0.14 m keeps a modest centerline clearance while the footprint
+# checker handles the true body width plus padding.
+safe_dist: 0.13

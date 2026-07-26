@@ -56,12 +56,16 @@ public:
   void searchFrontiers();
   bool dormantSeenFrontiers(Vector2d sensor_pos, double sensor_yaw);
   void setForceDormantFrontier(const Vector2d& frontier_center);
+  void setPersistentExclusionZone(const Vector2d& center);
 
   void getFrontiers(vector<vector<Vector2d>>& clusters, vector<Vector2d>& averages);
   void getDormantFrontiers(vector<vector<Vector2d>>& clusters, vector<Vector2d>& averages);
   void getFrontierBoxes(vector<pair<Vector2d, Vector2d>>& boxes);
   bool isAnyFrontierChanged();
   void wrapYaw(double& yaw);
+  static bool shouldExcludeCellsNearZone(
+      const vector<Vector2d>& cells, bool zone_active, const Vector2d& zone_center,
+      double zone_radius);
 
   shared_ptr<PerceptionUtils2D> percep_utils_;
 
@@ -74,6 +78,7 @@ private:
   bool haveOverlap(
       const Vector2d& min1, const Vector2d& max1, const Vector2d& min2, const Vector2d& max2);
   void computeFrontierInfo(Frontier2D& frontier);
+  bool shouldExcludeFrontierNearRobot(const Frontier2D& frontier) const;
 
   // Utils
   int countConnectUnknownGrids(const Eigen::Vector2d& pos);
@@ -98,6 +103,13 @@ private:
   double cluster_size_xy_;
   double min_view_finish_fraction_, resolution_;
   int min_contain_unknown_;
+  bool is_real_world_;
+  double real_world_exclusion_radius_;
+  bool have_latest_sensor_pos_;
+  Vector2d latest_sensor_pos_;
+  bool have_persistent_exclusion_zone_;
+  Vector2d persistent_exclusion_center_;
+  double persistent_exclusion_radius_;
 
   shared_ptr<SDFMap2D> sdf_map_;
   unique_ptr<RayCaster2D> raycaster_;

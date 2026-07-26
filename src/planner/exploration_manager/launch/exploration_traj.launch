@@ -19,7 +19,7 @@
   <arg name="depth_topic" value="/camera/depth/image_rect_raw"/>
 
   <arg name="cmd_vel_topic" value="/cmd_vel"/>
-  <arg name="need_init_rotation" default="false"/>
+  <arg name="need_init_rotation" default="true"/>
   <arg name="base_frame" default="base_link"/>
   <!-- Mapping must use the depth optical frame because /camera/depth/image_rect_raw
        is published in camera_depth_optical_frame. -->
@@ -167,8 +167,12 @@
     <!-- Reuse the existing traj_server init rotation so the robot scans once
          before normal exploration / object navigation begins. -->
     <param name="need_init" value="$(arg need_init_rotation)" type="bool"/>
-    <param name="max_correction_vel" value="0.80" type="double"/>
-    <param name="max_correction_omega" value="1.20" type="double"/>
+    <param name="max_correction_vel" value="0.35" type="double"/>
+    <param name="max_correction_omega" value="0.50" type="double"/>
+    <param name="tracking_slowdown_error" value="0.15" type="double"/>
+    <param name="tracking_stop_error" value="0.55" type="double"/>
+    <param name="tracking_min_speed_scale" value="0.25" type="double"/>
+    <param name="tracking_min_effective_vx" value="0.14" type="double"/>
   </node>
 
 </launch>

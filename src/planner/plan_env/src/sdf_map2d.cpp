@@ -95,7 +95,7 @@ void SDFMap2D::initMap(ros::NodeHandle& nh)
   md_->count_hit_and_miss_ = vector<short>(mp_->buffer_size_, 0);
   md_->count_hit_ = vector<short>(mp_->buffer_size_, 0);
   md_->count_miss_ = vector<short>(mp_->buffer_size_, 0);
-  md_->flag_rayend_ = vector<char>(mp_->buffer_size_, -1);
+  md_->flag_rayend_ = vector<int>(mp_->buffer_size_, -1);
   md_->distance_buffer_neg_ = vector<double>(mp_->buffer_size_, mp_->default_dist_);
   md_->distance_buffer_ = vector<double>(mp_->buffer_size_, mp_->default_dist_);
   md_->tmp_buffer_ = vector<double>(mp_->buffer_size_, 0);
@@ -171,9 +171,12 @@ void SDFMap2D::inputObjectCloud2D(
 
 void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
     const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
-    vector<Eigen::Vector2i>& free_grids)
+    vector<Eigen::Vector2i>& free_grids,
+    vector<Eigen::Vector2i>* semantic_free_grids)
 {
   free_grids.clear();
+  if (semantic_free_grids != nullptr)
+    semantic_free_grids->clear();
   int occupied_point_num = occupied_points->points.size();
   int raycast_point_num = raycast_points->points.size();
   if (occupied_point_num == 0 && raycast_point_num == 0)
@@ -202,6 +205,28 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
   int vox_adr;
   double length;
   std::unordered_map<int, char> flag_occ, flag_occ_stop, flag_free;
+  std::unordered_map<int, char> flag_semantic_rayend, flag_semantic_free;
+
+  auto markRayStop = [&](const Eigen::Vector2i& stop_idx) {
+    int stop_adr = toAddress(stop_idx);
+    flag_occ_stop[stop_adr] = 1;
+
+    if (mp_->ray_stop_dilation_ <= 0)
+      return;
+
+    for (int dx = -mp_->ray_stop_dilation_; dx <= mp_->ray_stop_dilation_; ++dx) {
+      for (int dy = -mp_->ray_stop_dilation_; dy <= mp_->ray_stop_dilation_; ++dy) {
+        if (dx == 0 && dy == 0)
+          continue;
+        if (std::abs(dx) + std::abs(dy) > mp_->ray_stop_dilation_)
+          continue;
+        Eigen::Vector2i dilated_idx = stop_idx + Eigen::Vector2i(dx, dy);
+        if (!isInMap(dilated_idx))
+          continue;
+        flag_occ_stop[toAddress(dilated_idx)] = 1;
+      }
+    }
+  };
 
   // First pass: Mark occupied grids only from obstacle-height depth points.
   for (int i = 0; i < occupied_point_num; ++i) {
@@ -231,20 +256,66 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
     vox_adr = toAddress(idx);
     if (tmp_flag) {
       flag_occ[vox_adr] = 1;  // Mark as occupied in hash map
-      flag_occ_stop[vox_adr] = 1;
+      markRayStop(idx);
+    }
+  }
 
-      if (mp_->ray_stop_dilation_ > 0) {
-        for (int dx = -mp_->ray_stop_dilation_; dx <= mp_->ray_stop_dilation_; ++dx) {
-          for (int dy = -mp_->ray_stop_dilation_; dy <= mp_->ray_stop_dilation_; ++dy) {
-            if (dx == 0 && dy == 0)
-              continue;
-            if (std::abs(dx) + std::abs(dy) > mp_->ray_stop_dilation_)
-              continue;
-            Eigen::Vector2i stop_idx = idx + Eigen::Vector2i(dx, dy);
-            if (!isInMap(stop_idx))
-              continue;
-            flag_occ_stop[toAddress(stop_idx)] = 1;
-          }
+  // Semantic obstacle rays use obstacle-height endpoints. MapROS can still use
+  // the full raycast free grid set for a smooth view-level semantic sector.
+  if (semantic_free_grids != nullptr) {
+    auto addSemanticFreeGrid = [&](const Eigen::Vector2i& free_idx) {
+      int adr = toAddress(free_idx);
+      if (!flag_semantic_free.count(adr)) {
+        flag_semantic_free[adr] = 1;
+        semantic_free_grids->push_back(free_idx);
+      }
+    };
+
+    for (int i = 0; i < occupied_point_num; ++i) {
+      auto& pt = occupied_points->points[i];
+      pt_w << pt.x, pt.y;
+
+      if (!isInMap(pt_w)) {
+        pt_w = closetPointInMap(pt_w, sensor_pos);
+        length = (pt_w - sensor_pos).norm();
+        if (length > mp_->max_ray_length_)
+          pt_w = (pt_w - sensor_pos) / length * mp_->max_ray_length_ + sensor_pos;
+      }
+      else {
+        length = (pt_w - sensor_pos).norm();
+        if (length > mp_->max_ray_length_)
+          pt_w = (pt_w - sensor_pos) / length * mp_->max_ray_length_ + sensor_pos;
+      }
+
+      posToIndex(pt_w, idx);
+      vox_adr = toAddress(idx);
+      if (flag_semantic_rayend[vox_adr])
+        continue;
+      flag_semantic_rayend[vox_adr] = 1;
+
+      if (mp_->ray_mode_ == 0) {
+        caster_->input(pt_w, sensor_pos);
+        caster_->nextId(idx);
+        addSemanticFreeGrid(idx);
+        while (caster_->nextId(idx)) {
+          int adr = toAddress(idx);
+          if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)
+            break;
+          if (md_->virtual_ground_buffer_[adr])
+            continue;
+          addSemanticFreeGrid(idx);
+        }
+        addSemanticFreeGrid(idx);
+      }
+      else {
+        caster_->input(sensor_pos, pt_w);
+        while (caster_->nextId(idx)) {
+          int adr = toAddress(idx);
+          if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)
+            break;
+          if (md_->virtual_ground_buffer_[adr])
+            break;
+          addSemanticFreeGrid(idx);
         }
       }
     }
