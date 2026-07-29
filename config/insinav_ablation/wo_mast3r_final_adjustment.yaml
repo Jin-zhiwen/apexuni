@@ -1,0 +1,8 @@
+# @package _global_
+ablation:
+  name: wo_mast3r_final_adjustment
+  terminal:
+    # Keep R1/R2/R3 and the same MASt3R quality check, but discard the estimated
+    # forward/lateral/yaw correction and use conventional RGB-D target approach.
+    mode: rgbd_no_pose_adjustment
+video_output_path: "videos/ablation/wo_mast3r_final_adjustment_{split}"

@@ -146,7 +146,7 @@ mast3r_refine:
   # Set to "masked" only for the older object-mask-only geometry ablation.
   geometry_mode: "full_frame"
   mast3r_root: "mast3r"
-  weights: "" # empty -> use huggingface model name
+  weights: "data/models/mast3r"
   device: "cuda"
   stop_yaw_tolerance_deg: 15.0
   # This limits the accepted/executed local SE(2) displacement; it does not gate inference.
@@ -205,6 +205,8 @@ ablation:
   terminal:
     # geometry: quality-gated fixed SE(2) + final yaw alignment (Full)
     # rgbd_after_geometry: same route and MASt3R gate, RGB-D stop/approach only
+    # rgbd_no_pose_adjustment: controlled MASt3R final-adjustment ablation; all
+    # routes and the geometry quality gate stay enabled, but pose outputs are unused
     # rgbd: no MASt3R; sensor RGB-D stop after boxed instance confirmation (B0)
     mode: "geometry"
 

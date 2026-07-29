@@ -6,8 +6,18 @@ output for each worker.
 
 ```bash
 conda activate apexnav
+./scripts/ablation/download_insinav_models.sh
 ./scripts/ablation/run_insinav_ablation.sh <variant> <gpu-id> <worker-id>
 ```
+
+The download command is idempotent and supports interrupted downloads. It stores
+Torch Hub weights in `data/model_cache/torch/hub/checkpoints`, Hugging Face BERT in
+`data/model_cache/huggingface`, the local DINO checkout in `data/models/dino`, and
+the MASt3R checkpoint in `data/models/mast3r`. The launcher checks these locations
+before starting ROS or the visual-model services.
+
+Run one command in each terminal without `&`, PID variables, or `wait`. The launcher
+prints model-loading progress and then streams the normal Habitat evaluation output.
 
 Core variants:
 
@@ -19,6 +29,7 @@ Core variants:
 | `wo_multi_route` | Keep R3 only; disable both LightGlue routes |
 | `wo_crop_ownership` | R1 full-frame evidence selects the DINO candidate without crop ownership matching |
 | `wo_geometry_terminal` | Keep route triggers and MASt3R quality gate; replace fixed SE(2)/yaw with RGB-D stop/approach |
+| `wo_mast3r_final_adjustment` | Keep R1/R2/R3 and the MASt3R quality gate; discard MASt3R translation/yaw and use RGB-D target approach |
 
 Run the six core rows with one isolated worker per list entry. Repeat a physical
 GPU ID to place multiple workers on that GPU; each list position still receives a

@@ -1054,9 +1054,15 @@ def main(cfg: DictConfig) -> None:
     boxed_full_frame_gate_enabled = bool(boxed_cfg.get("full_frame_gate", True))
     boxed_crop_ownership_enabled = bool(boxed_cfg.get("crop_ownership", True))
     terminal_mode = str(terminal_cfg.get("mode", "geometry")).strip().lower()
-    if terminal_mode not in {"geometry", "rgbd_after_geometry", "rgbd"}:
+    if terminal_mode not in {
+        "geometry",
+        "rgbd_after_geometry",
+        "rgbd_no_pose_adjustment",
+        "rgbd",
+    }:
         raise ValueError(
-            "ablation.terminal.mode must be geometry, rgbd_after_geometry, or rgbd; "
+            "ablation.terminal.mode must be geometry, rgbd_after_geometry, "
+            "rgbd_no_pose_adjustment, or rgbd; "
             f"got {terminal_mode!r}"
         )
     print(
@@ -3202,7 +3208,11 @@ def main(cfg: DictConfig) -> None:
 
                 rgbd_terminal_distance = float("inf")
                 rgbd_terminal_candidate_idx = None
-                if mast3r_result_accepted and terminal_mode == "rgbd_after_geometry":
+                rgbd_pose_ablation_active = terminal_mode in {
+                    "rgbd_after_geometry",
+                    "rgbd_no_pose_adjustment",
+                }
+                if mast3r_result_accepted and rgbd_pose_ablation_active:
                     depth_cfg = cfg.habitat.simulator.agents.main_agent.sim_sensors.depth_sensor
                     if refine_trigger_source == "lightglue":
                         rgbd_terminal_distance = approach_reference_distance
@@ -3216,6 +3226,22 @@ def main(cfg: DictConfig) -> None:
                                 float(depth_cfg.min_depth),
                                 float(depth_cfg.max_depth),
                             )
+                    elif (
+                        terminal_mode == "rgbd_no_pose_adjustment"
+                        and refine_trigger_source == "lightglue_no_box"
+                        and current_best_crop_idx is not None
+                        and current_best_crop_mask is not None
+                    ):
+                        # R2 is detector-independent for confirmation. After confirmation,
+                        # use the strongest goal-class DINO candidate only as a conventional
+                        # RGB-D approach target; it does not contribute to route acceptance.
+                        rgbd_terminal_candidate_idx = current_best_crop_idx
+                        rgbd_terminal_distance = estimate_mask_depth_distance(
+                            observations["depth"],
+                            current_best_crop_mask,
+                            float(depth_cfg.min_depth),
+                            float(depth_cfg.max_depth),
+                        )
                     else:
                         rgbd_terminal_distance = estimate_center_depth_distance(
                             observations["depth"],
@@ -3241,7 +3267,7 @@ def main(cfg: DictConfig) -> None:
                     if (
                         mast3r_result is not None
                         and mast3r_result_accepted
-                        and terminal_mode == "rgbd_after_geometry"
+                        and rgbd_pose_ablation_active
                     ):
                         accepted_route = refine_trigger_source
                         publish_mast3r_hint(
@@ -3286,6 +3312,7 @@ def main(cfg: DictConfig) -> None:
                             print(
                                 "[INSiNav_RGBD_TERMINAL] MASt3R quality gate passed; "
                                 f"route={accepted_route}, fixed_SE2=0, yaw_alignment=0, "
+                                f"mode={terminal_mode}, "
                                 f"sensor_depth={rgbd_terminal_distance:.3f}"
                             )
                         refine_latched = False
