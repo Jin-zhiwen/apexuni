@@ -40,6 +40,13 @@
 
 </div>
 
+## 🎥 Video Demonstrations
+
+The following screen recordings are available directly from this repository:
+
+- [Screen recording — 2026-06-14 22:29:14](assets/videos/screen-recording-2026-06-14-22-29-14.webm)
+- [Screen recording — 2026-06-14 22:35:11](assets/videos/screen-recording-2026-06-14-22-35-11.webm)
+
 ## 📢 News
 - **[10/02/2026]**: ROS2 Jazzy support is now available! Thanks to [romaster93](https://github.com/romaster93) for contributing the ROS2 interface. Check out the [ros2-jazzy](https://github.com/Robotics-STAR-Lab/ApexNav/tree/ros2-jazzy) branch.
 - **[10/12/2025]**: ApexNav released real world test example code. Check out the [Real World README](./real_world_test_example/README.md) for more details.
