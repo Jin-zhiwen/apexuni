@@ -50,11 +50,30 @@ bool selectFootprintSafeLocalTargetFromPath(const Eigen::Vector2d& current_pos,
     const std::function<bool(const Eigen::Vector2d&, double)>& is_collision,
     PathPoseCandidate& safe_pose);
 
+bool selectCornerAwareFootprintSafeLocalTargetFromPath(
+    const Eigen::Vector2d& current_pos,
+    const std::vector<Eigen::Vector2d>& path,
+    double local_distance,
+    double min_target_distance,
+    double max_path_heading_change,
+    const std::function<bool(const Eigen::Vector2d&, double)>& is_collision,
+    PathPoseCandidate& safe_pose,
+    bool& corner_limited);
+
 bool isLocalTargetFacingForward(
     const Eigen::Vector2d& current_pos,
     double current_yaw,
     const Eigen::Vector2d& target_pos,
     double max_yaw_error);
+
+double computeTargetYawError(
+    const Eigen::Vector2d& current_pos,
+    double current_yaw,
+    const Eigen::Vector2d& target_pos);
+
+bool shouldRotateBeforeTranslation(
+    double yaw_error,
+    double rotation_yaw_error_threshold);
 
 bool selectFootprintSafeForwardLocalTargetFromPath(const Eigen::Vector2d& current_pos,
     double current_yaw,
@@ -64,6 +83,12 @@ bool selectFootprintSafeForwardLocalTargetFromPath(const Eigen::Vector2d& curren
     double max_yaw_error,
     const std::function<bool(const Eigen::Vector2d&, double)>& is_collision,
     PathPoseCandidate& safe_pose);
+
+bool isInPlaceRotationFootprintSafe(const Eigen::Vector2d& current_pos,
+    double start_yaw,
+    double target_yaw,
+    double max_yaw_step,
+    const std::function<bool(const Eigen::Vector2d&, double)>& is_collision);
 
 Eigen::Vector2d clampLocalTargetToLookahead(
     const Eigen::Vector2d& current_pos,

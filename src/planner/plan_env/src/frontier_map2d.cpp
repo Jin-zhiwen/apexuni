@@ -11,6 +11,7 @@
  * @author Zager-Zhang
  */
 #include <plan_env/frontier_map2d.h>
+#include <limits>
 #include <unordered_map>
 
 namespace apexnav_planner {
@@ -35,6 +36,8 @@ FrontierMap2D::FrontierMap2D(const SDFMap2D::Ptr& sdf_map, ros::NodeHandle& nh)
   nh.param("frontier/cluster_min", cluster_min_, -1);
   nh.param("frontier/cluster_size_xy", cluster_size_xy_, -1.0);
   nh.param("frontier/min_contain_unknown", min_contain_unknown_, 50);
+  nh.param("frontier/min_candidate_unknown", min_candidate_unknown_, min_contain_unknown_);
+  nh.param("frontier/force_dormant_match_distance", force_dormant_match_distance_, 0.50);
   nh.param("frontier/min_view_finish_fraction", min_view_finish_fraction_, -1.0);
 
   // Initialize ray-casting system for visibility analysis
@@ -162,20 +165,26 @@ void FrontierMap2D::expandFrontier(const Eigen::Vector2i& first)
     }
   }
 
-  // Validate cluster size and create frontier object if meets minimum threshold
+  // A small depth hole is a formal frontier, but not a useful exploration goal.
+  // Require both a substantial boundary and enough connected unknown area before
+  // allowing the cluster into any distance, semantic, or TSP policy.
   if ((int)expanded.size() > cluster_min_) {
     Frontier2D frontier;
     frontier.cells_ = expanded;
     computeFrontierInfo(frontier);  // Calculate geometric properties and metadata
-    candidate_frontiers_.push_back(frontier);
-  }
-  else {
-    // Reset flags for clusters below minimum size threshold
-    for (auto cell : expanded) {
-      Vector2i cell_idx;
-      sdf_map_->posToIndex(cell, cell_idx);
-      frontier_flag_[toAdr(cell_idx)] = NONE;
+    const bool sufficient_unknown = min_candidate_unknown_ <= 0 ||
+        countConnectUnknownGrids(frontier.cells_.front()) >= min_candidate_unknown_;
+    if (sufficient_unknown) {
+      candidate_frontiers_.push_back(frontier);
+      return;
     }
+  }
+
+  // Reset flags for rejected clusters so a later map update can evaluate them again.
+  for (auto cell : expanded) {
+    Vector2i cell_idx;
+    sdf_map_->posToIndex(cell, cell_idx);
+    frontier_flag_[toAdr(cell_idx)] = NONE;
   }
 }
 
@@ -498,63 +507,61 @@ int FrontierMap2D::countConnectUnknownGrids(const Eigen::Vector2d& pos)
 
 void FrontierMap2D::setForceDormantFrontier(const Vector2d& frontier_center)
 {
-  // Initialize data structures for region growing around specified center
-  queue<Eigen::Vector2i> cell_queue;
-  vector<Eigen::Vector2d> expanded;
-  Vector2i idx;
-
-  // Convert center position to grid index and mark as force dormant
-  sdf_map_->posToIndex(frontier_center, idx);
-  expanded.push_back(frontier_center);
-  cell_queue.push(idx);
-  frontier_flag_[toAdr(idx)] = FORCE_DORMANT;
-
-  // Execute breadth-first search for connected frontier region identification
-  while (!cell_queue.empty()) {
-    auto cur = cell_queue.front();
-    cell_queue.pop();
-    auto nbrs = allNeighbors(cur);
-
-    // Examine neighbors for active or dormant frontier cells
-    for (auto nbr : nbrs) {
-      int adr = toAdr(nbr);
-
-      // Only process cells that are currently active or dormant frontiers
-      if (frontier_flag_[adr] != ACTIVE && frontier_flag_[adr] != DORMANT)
-        continue;
-
-      // Add frontier cell to force dormant region
-      Vector2d pos;
-      sdf_map_->indexToPos(nbr, pos);
-      expanded.push_back(pos);
-      cell_queue.push(nbr);
-      frontier_flag_[adr] = FORCE_DORMANT;
+  // The failed goal is the last collision-safe point on an A* path, rather than
+  // necessarily a frontier cell. Match it to the nearest frontier cell instead
+  // of assuming a grid-adjacent BFS can find the cluster.
+  double nearest_distance = std::numeric_limits<double>::infinity();
+  Frontier2D* nearest_frontier = nullptr;
+  auto findNearest = [&](list<Frontier2D>& frontiers) {
+    for (auto& frontier : frontiers) {
+      for (const auto& cell : frontier.cells_) {
+        const double distance = (cell - frontier_center).norm();
+        if (distance < nearest_distance) {
+          nearest_distance = distance;
+          nearest_frontier = &frontier;
+        }
+      }
     }
+  };
+  findNearest(frontiers_);
+  findNearest(dormant_frontiers_);
+
+  if (nearest_frontier == nullptr || nearest_distance > force_dormant_match_distance_) {
+    ROS_WARN("[FrontierMap2D] Failed goal (%.2f, %.2f) does not match a frontier within %.2f m; keeping all frontiers.",
+        frontier_center.x(), frontier_center.y(), force_dormant_match_distance_);
+    return;
   }
 
-  // Remove force dormant frontiers from active frontier list
-  for (auto it = frontiers_.begin(); it != frontiers_.end();) {
-    Vector2i avg_idx;
-    sdf_map_->posToIndex(it->average_, avg_idx);
-    if (frontier_flag_[toAdr(avg_idx)] == FORCE_DORMANT) {
-      it = frontiers_.erase(it);
-    }
-    else {
-      ++it;
-    }
+  const int matched_cell_count = static_cast<int>(nearest_frontier->cells_.size());
+  for (const auto& cell : nearest_frontier->cells_) {
+    Vector2i idx;
+    sdf_map_->posToIndex(cell, idx);
+    frontier_flag_[toAdr(idx)] = FORCE_DORMANT;
   }
 
-  // Remove force dormant frontiers from dormant frontier list
-  for (auto it = dormant_frontiers_.begin(); it != dormant_frontiers_.end();) {
-    Vector2i avg_idx;
-    sdf_map_->posToIndex(it->average_, avg_idx);
-    if (frontier_flag_[toAdr(avg_idx)] == FORCE_DORMANT) {
-      it = dormant_frontiers_.erase(it);
+  auto eraseForced = [this](list<Frontier2D>& frontiers) {
+    for (auto it = frontiers.begin(); it != frontiers.end();) {
+      bool forced = false;
+      for (const auto& cell : it->cells_) {
+        Vector2i idx;
+        sdf_map_->posToIndex(cell, idx);
+        if (frontier_flag_[toAdr(idx)] == FORCE_DORMANT) {
+          forced = true;
+          break;
+        }
+      }
+      if (forced) {
+        it = frontiers.erase(it);
+      }
+      else {
+        ++it;
+      }
     }
-    else {
-      ++it;
-    }
-  }
+  };
+  eraseForced(frontiers_);
+  eraseForced(dormant_frontiers_);
+  ROS_WARN("[FrontierMap2D] Force-dormant matched frontier: goal=(%.2f, %.2f), distance=%.2f m, cells=%d.",
+      frontier_center.x(), frontier_center.y(), nearest_distance, matched_cell_count);
 }
 
 void FrontierMap2D::getFrontiers(

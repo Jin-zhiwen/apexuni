@@ -66,3 +66,20 @@ target_link_libraries(plan_env
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
 )
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(sdf_map2d_raycast_test
+    test/sdf_map2d_raycast_test.cpp
+  )
+  if(TARGET sdf_map2d_raycast_test)
+    add_dependencies(sdf_map2d_raycast_test
+      ${catkin_EXPORTED_TARGETS}
+    )
+    target_link_libraries(sdf_map2d_raycast_test
+      plan_env
+      ${catkin_LIBRARIES}
+      ${PCL_LIBRARIES}
+      gtest_main
+    )
+  endif()
+endif()

@@ -3,7 +3,7 @@
 
   <arg name="map_size_x" value="80.0"/>
   <arg name="map_size_y" value="80.0"/>
-  <arg name="camera_height" value="0.43"/>
+  <arg name="camera_height" value="0.41"/>
 
   <arg name="is_real_world" default="true"/>
 
@@ -32,8 +32,10 @@
   <arg name="kimera_body_child" default="$(arg body_frame)"/>
   <arg name="kimera_body_x" default="0.0"/>
   <arg name="kimera_body_y" default="0.0"/>
-  <!-- Keep body origin colocated with Kimera base_link until physical center offset is measured. -->
-  <arg name="kimera_body_z" default="0.0"/>
+  <!-- Kimera's optical-like base_link is located at the D435i lens. The lens is
+       0.345 m in front of the Go2 center, and optical +z points forward, so the
+       body origin is 0.345 m behind the lens along optical -z. -->
+  <arg name="kimera_body_z" default="-0.345"/>
   <!-- Optical -> body: camera z-forward -> body x-forward, camera x-right -> body -y. -->
   <arg name="kimera_body_yaw" default="0.0"/>
   <arg name="kimera_body_pitch" default="-1.57079632679"/>
@@ -167,8 +169,21 @@
     <!-- Reuse the existing traj_server init rotation so the robot scans once
          before normal exploration / object navigation begins. -->
     <param name="need_init" value="$(arg need_init_rotation)" type="bool"/>
+    <!-- Original initial scan speed (pi/3). Kimera keeps its conservative
+         one-second forced-keyframe interval; visual disparity can trigger sooner. -->
+    <param name="init_rotation_omega" value="1.0471975512" type="double"/>
+    <!-- Keep Go2 still while Kimera initializes gravity and IMU bias, then fail
+         closed if odometry stops, freezes, or cannot finish one scan. -->
+    <param name="init_odom_warmup" value="3.0" type="double"/>
+    <param name="init_rotation_timeout" value="10.0" type="double"/>
+    <param name="init_odom_timeout" value="1.5" type="double"/>
+    <param name="init_no_progress_timeout" value="1.5" type="double"/>
     <param name="max_correction_vel" value="0.35" type="double"/>
-    <param name="max_correction_omega" value="0.50" type="double"/>
+    <param name="max_correction_omega" value="0.70" type="double"/>
+    <!-- Pure in-place turns share the same completion tolerance as the FSM.
+         Keep a minimum non-zero command above the Go2 low-speed yaw deadband. -->
+    <param name="rotation_tolerance" value="0.10" type="double"/>
+    <param name="min_rotation_omega" value="0.25" type="double"/>
     <param name="tracking_slowdown_error" value="0.15" type="double"/>
     <param name="tracking_stop_error" value="0.55" type="double"/>
     <param name="tracking_min_speed_scale" value="0.25" type="double"/>

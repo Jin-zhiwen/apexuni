@@ -75,6 +75,8 @@ public:
   void initialize(ros::NodeHandle& nh);
 
   int planNextBestPoint(const Vector3d& pos, const double& yaw);
+  bool replanPathToGoal(const Vector2d& start, const Vector2d& goal,
+      Vector2d& refined_goal, vector<Vector2d>& replanned_path);
   void setSkipObjectNavigationOnce(bool skip = true);
   bool planTrajectory(const Eigen::VectorXd& start, const Eigen::VectorXd& end, const Vector3d& ctrl);
   void getSortedSemanticFrontiers(const Vector2d& cur_pos, const vector<Vector2d>& frontiers,
@@ -141,6 +143,11 @@ private:
   ros::Publisher footprint_collision_marker_pub_;
   unique_ptr<RayCaster2D> ray_caster2d_;  ///< Ray casting for collision checking
   std::string collision_marker_frame_id_ = "odom";
+  double path_shortcut_max_segment_ = 0.75;
+  // Must match the FSM lookahead check so policy selection does not accept a
+  // point-path that the rectangular Go2 footprint will reject immediately.
+  double local_target_distance_ = 1.50;
+  double local_target_min_distance_ = 0.30;
   bool skip_object_navigation_once_ = false;
 };
 
@@ -165,41 +172,29 @@ inline bool ExplorationManager::searchObjectPathExtreme(const Vector3d& start,
 
 inline void ExplorationManager::shortenPath(vector<Vector2d>& path)
 {
-  if (path.empty()) {
-    ROS_ERROR("Empty path to shorten");
+  if (path.size() < 3) {
     return;
   }
 
-  // Shorten the path by keeping only critical intermediate points
-  const double dist_thresh = 3.0;  // Minimum distance threshold for waypoint retention
-  vector<Vector2d> short_tour = { path.front() };
-
-  for (int i = 1; i < (int)path.size() - 1; ++i) {
-    if ((path[i] - short_tour.back()).norm() > dist_thresh)
-      short_tour.push_back(path[i]);
-    else {
-      // Add waypoints only when necessary to avoid collision
-      ray_caster2d_->input(short_tour.back(), path[i + 1]);
-      Eigen::Vector2i idx;
-      while (ray_caster2d_->nextId(idx) && ros::ok()) {
-        if (sdf_map_->getInflateOccupancy(idx) == 1 ||
-            sdf_map_->getOccupancy(idx) == SDFMap2D::UNKNOWN) {
-          short_tour.push_back(path[i]);
-          break;
-        }
-      }
+  // Preserve the same collision model used by A*. The previous point-map ray
+  // cast could replace a valid detour with a long line that a Go2 body cannot
+  // traverse. Keeping short segments also guarantees a local target exists.
+  vector<Vector2d> shortened;
+  shortened.reserve(path.size());
+  shortened.push_back(path.front());
+  size_t anchor = 0;
+  while (anchor + 1 < path.size()) {
+    size_t furthest_safe = anchor + 1;
+    for (size_t candidate = anchor + 1; candidate < path.size(); ++candidate) {
+      if ((path[candidate] - path[anchor]).norm() > path_shortcut_max_segment_ + 1.0e-6)
+        continue;
+      if (path_finder_->isSegmentSafe(path[anchor], path[candidate]))
+        furthest_safe = candidate;
     }
+    shortened.push_back(path[furthest_safe]);
+    anchor = furthest_safe;
   }
-
-  // Always include the final destination
-  if ((path.back() - short_tour.back()).norm() > 1e-3)
-    short_tour.push_back(path.back());
-
-  // Ensure minimum path complexity (at least three points)
-  if (short_tour.size() == 2)
-    short_tour.insert(short_tour.begin() + 1, 0.5 * (short_tour[0] + short_tour[1]));
-
-  path = short_tour;
+  path.swap(shortened);
 }
 
 inline vector<Eigen::Vector2i> ExplorationManager::allNeighbors(

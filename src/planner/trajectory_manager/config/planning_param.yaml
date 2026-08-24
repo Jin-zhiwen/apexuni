@@ -10,16 +10,16 @@ max_cur: 6.0
 # Go2 indoor exploration so the planner can still generate tight turns.
 wheel_base: 0.14
 
-# Collision proxy for Unitree Go2. Keep the body envelope compact for indoor
-# exploration; this matches the earlier real-world tuning that allowed the robot
-# to move through narrow passages.
-length: 0.50
+# Collision proxy for Unitree Go2, centered on the body odometry origin. The
+# D435i lens is measured 0.345 m ahead of the Go2 center, so a 0.70 m length
+# places it just inside the 0.35 m front edge instead of leaving it unprotected.
+length: 0.70
 width: 0.30
 height: 0.40
 
-# Offset the collision box slightly backward from the odom/body origin so goals
-# near walls are not rejected by the front edge too aggressively.
-odom_to_center_x: -0.10
+# /kimera_vio_ros/body_odometry is now translated from the D435i lens to the
+# measured Go2 center. Keep the collision proxy centered on that body origin.
+odom_to_center_x: 0.0
 odom_to_center_y: 0.0
 
 ######################## kinoastar ########################
@@ -75,7 +75,7 @@ sparseResolution: 8
 # Backend sampling time
 timeResolution: 1
 
-# Safety distance for trajectory optimization. With algorithm_traj.xml's 0.08 m
-# map inflation, 0.14 m keeps a modest centerline clearance while the footprint
-# checker handles the true body width plus padding.
+# Keep the ESDF penalty modest because unknown cells are also represented as
+# obstacles in the current partial map. KinoAstar's rectangular footprint
+# checker provides the hard Go2 collision envelope.
 safe_dist: 0.13

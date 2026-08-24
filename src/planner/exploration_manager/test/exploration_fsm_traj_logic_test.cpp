@@ -231,6 +231,52 @@ TEST(ExplorationFSMRealLogicTest, LocalTargetBacksOffToFootprintSafePose)
   EXPECT_NEAR(safe_pose.yaw, 0.0, 1e-6);
 }
 
+TEST(ExplorationFSMRealLogicTest, CornerAwareTargetStopsBeforeRightAngleShortcut)
+{
+  const std::vector<Eigen::Vector2d> path{
+    Eigen::Vector2d(0.0, 0.0),
+    Eigen::Vector2d(0.5, 0.0),
+    Eigen::Vector2d(1.0, 0.0),
+    Eigen::Vector2d(1.0, 0.5),
+    Eigen::Vector2d(1.0, 1.0),
+  };
+  apexnav_planner::PathPoseCandidate safe_pose;
+  bool corner_limited = false;
+
+  const bool found = apexnav_planner::selectCornerAwareFootprintSafeLocalTargetFromPath(
+      Eigen::Vector2d::Zero(), path, 2.0, 0.30, M_PI / 4.0,
+      [](const Eigen::Vector2d&, double) { return false; },
+      safe_pose, corner_limited);
+
+  EXPECT_TRUE(found);
+  EXPECT_TRUE(corner_limited);
+  EXPECT_NEAR(safe_pose.pos.x(), 1.0, 1e-6);
+  EXPECT_NEAR(safe_pose.pos.y(), 0.0, 1e-6);
+  EXPECT_NEAR(safe_pose.yaw, 0.0, 1e-6);
+}
+
+TEST(ExplorationFSMRealLogicTest, CornerAwareTargetKeepsGentlePathLookahead)
+{
+  const std::vector<Eigen::Vector2d> path{
+    Eigen::Vector2d(0.0, 0.0),
+    Eigen::Vector2d(0.5, 0.0),
+    Eigen::Vector2d(1.0, 0.1),
+    Eigen::Vector2d(1.5, 0.25),
+  };
+  apexnav_planner::PathPoseCandidate safe_pose;
+  bool corner_limited = false;
+
+  const bool found = apexnav_planner::selectCornerAwareFootprintSafeLocalTargetFromPath(
+      Eigen::Vector2d::Zero(), path, 2.0, 0.30, M_PI / 4.0,
+      [](const Eigen::Vector2d&, double) { return false; },
+      safe_pose, corner_limited);
+
+  EXPECT_TRUE(found);
+  EXPECT_FALSE(corner_limited);
+  EXPECT_NEAR(safe_pose.pos.x(), 1.5, 1e-6);
+  EXPECT_NEAR(safe_pose.pos.y(), 0.25, 1e-6);
+}
+
 TEST(ExplorationFSMRealLogicTest, LocalTargetDoesNotFallThroughToDistantFrontier)
 {
   const std::vector<Eigen::Vector2d> path{
@@ -276,6 +322,43 @@ TEST(ExplorationFSMRealLogicTest, ForwardLocalTargetRejectsPointBehindRobot)
   EXPECT_FALSE(found);
 }
 
+TEST(ExplorationFSMRealLogicTest, FootprintSafeTargetBehindRobotRemainsSelectable)
+{
+  const std::vector<Eigen::Vector2d> path{
+    Eigen::Vector2d(0.0, 0.0),
+    Eigen::Vector2d(-0.8, 0.0),
+    Eigen::Vector2d(-1.2, 0.0),
+  };
+  apexnav_planner::PathPoseCandidate safe_pose;
+
+  const bool found = apexnav_planner::selectFootprintSafeLocalTargetFromPath(
+      Eigen::Vector2d(0.0, 0.0),
+      path,
+      1.5,
+      0.30,
+      [](const Eigen::Vector2d&, double) {
+        return false;
+      },
+      safe_pose);
+
+  EXPECT_TRUE(found);
+  EXPECT_LT(safe_pose.pos.x(), 0.0);
+}
+
+TEST(ExplorationFSMRealLogicTest, LargeHeadingErrorSelectsRotationWithoutRejectingTarget)
+{
+  const Eigen::Vector2d current_pos(0.0, 0.0);
+  const Eigen::Vector2d behind_target(-1.0, 0.0);
+  const double yaw_error = apexnav_planner::computeTargetYawError(
+      current_pos, 0.0, behind_target);
+
+  EXPECT_NEAR(std::fabs(yaw_error), M_PI, 1e-6);
+  EXPECT_TRUE(apexnav_planner::shouldRotateBeforeTranslation(
+      yaw_error, 0.7853981633974483));
+  EXPECT_FALSE(apexnav_planner::shouldRotateBeforeTranslation(
+      0.75, 0.7853981633974483));
+}
+
 TEST(ExplorationFSMRealLogicTest, ForwardLocalTargetAcceptsPointInsideForwardSector)
 {
   const std::vector<Eigen::Vector2d> path{
@@ -300,6 +383,24 @@ TEST(ExplorationFSMRealLogicTest, ForwardLocalTargetAcceptsPointInsideForwardSec
   EXPECT_TRUE(found);
   EXPECT_GT(safe_pose.pos.x(), 0.0);
   EXPECT_GT(safe_pose.pos.y(), 0.0);
+}
+
+TEST(ExplorationFSMRealLogicTest, RotationSweepChecksEveryIntermediateFootprintHeading)
+{
+  const auto no_collision = [](const Eigen::Vector2d&, double) { return false; };
+  EXPECT_TRUE(apexnav_planner::isInPlaceRotationFootprintSafe(
+      Eigen::Vector2d::Zero(), 0.0, 3.14159265358979323846, 0.174532925199,
+      no_collision));
+
+  const auto quarter_turn_collision = [](const Eigen::Vector2d&, double yaw) {
+    const double error = std::atan2(
+        std::sin(yaw - 1.57079632679489661923),
+        std::cos(yaw - 1.57079632679489661923));
+    return std::fabs(error) < 0.12;
+  };
+  EXPECT_FALSE(apexnav_planner::isInPlaceRotationFootprintSafe(
+      Eigen::Vector2d::Zero(), 0.0, 3.14159265358979323846, 0.174532925199,
+      quarter_turn_collision));
 }
 
 TEST(ExplorationFSMRealLogicTest, LocalTargetClampKeepsGradientAdjustmentInsideLookahead)

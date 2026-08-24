@@ -4,7 +4,7 @@
   <arg name="domain_id" default="0" doc="DDS domain ID for GO2 robot (0 or 1)"/>
   <arg name="max_vx" default="0.35" doc="Maximum forward velocity (m/s)"/>
   <arg name="max_vy" default="0.15" doc="Maximum lateral velocity (m/s)"/>
-  <arg name="max_yaw" default="0.5" doc="Maximum angular velocity (rad/s)"/>
+  <arg name="max_yaw" default="1.0471975512" doc="Maximum angular velocity (rad/s)"/>
   <arg name="cmd_timeout" default="0.5" doc="Command timeout in seconds"/>
   <arg name="publish_rate" default="50.0" doc="Command publishing rate in Hz"/>
   <arg name="auto_stand" default="true" doc="Auto-stand robot on startup"/>

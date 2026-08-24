@@ -19,7 +19,7 @@ max_rgb_depth_dt: 0.08
 
 goal:
   goal_type: ins-image
-  image_path: "/home/jzw/apexuni/ApexNav/data/screen1.png"
+  image_path: "/home/jzw/apexuni/ApexNav/data/screen2.png"
   goal_label: ""
   goal_image_topic: ""
   infer_label: true

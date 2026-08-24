@@ -105,6 +105,49 @@ class KinoAstarSafetyGuardsTest(unittest.TestCase):
         self.assertIn("setForceDormantFrontier(object_goal_pos)", source)
         self.assertIn("dormant_frontier_flag_ = true", source)
 
+    def test_blocked_in_place_rotation_falls_back_without_dormanting_frontier(self):
+        source = (
+            REPO_ROOT
+            / "src"
+            / "planner"
+            / "exploration_manager"
+            / "src"
+            / "exploration_fsm_traj.cpp"
+        ).read_text()
+        rotation_branch = source.split(
+            "if (shouldRotateBeforeTranslation(", 1
+        )[1].split("Eigen::Vector2d goal_pos", 1)[0]
+
+        self.assertIn("fall back to KinoAstar curved trajectory", rotation_branch)
+        self.assertNotIn("setForceDormantFrontier", rotation_branch)
+        self.assertNotIn("return TrajPlannerResult::FAILED", rotation_branch)
+
+    def test_unsafe_local_target_requires_repeated_failures_before_dormancy(self):
+        source = (
+            REPO_ROOT
+            / "src"
+            / "planner"
+            / "exploration_manager"
+            / "src"
+            / "exploration_fsm_traj.cpp"
+        ).read_text()
+        unsafe_target_branch = source.split(
+            "if (!local_target_valid)", 1
+        )[1].split("const Eigen::Vector2d rotation_pos", 1)[0]
+
+        self.assertIn("planning_failure_count_++", unsafe_target_branch)
+        self.assertIn("MAX_CONSECUTIVE_PLANNING_FAILURES", unsafe_target_branch)
+        self.assertRegex(
+            unsafe_target_branch,
+            re.compile(
+                r"if\s*\(planning_failure_count_\s*>=\s*"
+                r"FSMConstantsReal::MAX_CONSECUTIVE_PLANNING_FAILURES\)\s*\{\s*"
+                r"ROS_WARN\([^;]+;\s*"
+                r"expl_manager_->frontier_map2d_->setForceDormantFrontier",
+                re.MULTILINE,
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

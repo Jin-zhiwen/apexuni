@@ -10,9 +10,9 @@
     <arg name="cy_"/>
     <arg name="fx_"/>
     <arg name="fy_"/>
-    <arg name="camera_height_" default="0.43"/>
+    <arg name="camera_height_" default="0.41"/>
     <arg name="obstacle_min_above_floor_" default="0.15"/>
-    <arg name="obstacle_max_above_floor_" default="0.60"/>
+    <arg name="obstacle_max_above_floor_" default="0.40"/>
     <arg name="depth_min_dist_" default="0.20"/>
     <arg name="depth_max_dist_" default="3.00"/>
     <arg name="obstacles_inflation_" default="0.05"/>
@@ -43,13 +43,15 @@
         <param name="sdf_map/obstacles_inflation" value="$(arg obstacles_inflation_)" />
         <param name="sdf_map/local_bound" value="5.0"/>
 
-        <param name="sdf_map/p_hit" value="0.70"/>
-        <param name="sdf_map/p_miss" value="0.35"/>
+        <!-- A D435i wall hit must dominate isolated invalid/background returns. -->
+        <param name="sdf_map/p_hit" value="0.90"/>
+        <param name="sdf_map/p_miss" value="0.48"/>
         <param name="sdf_map/p_min" value="0.10"/>
         <param name="sdf_map/p_max" value="0.98"/>
         <param name="sdf_map/p_occ" value="0.80"/>
         <param name="sdf_map/max_ray_length" value="$(arg depth_max_dist_)"/>
         <param name="sdf_map/ray_stop_dilation" value="1"/>
+        <param name="sdf_map/stop_at_persistent_occupancy" value="true" type="bool"/>
         <param name="sdf_map/optimistic" value="false" type="bool"/>
         <param name="sdf_map/signed_dist" value="false" type="bool"/>
 
@@ -69,6 +71,10 @@
         <param name="map_ros/camera_height" value="$(arg camera_height_)"/>
         <param name="map_ros/filter_min_height" value="$(arg obstacle_min_above_floor_)"/>
         <param name="map_ros/filter_max_height" value="$(arg obstacle_max_above_floor_)"/>
+        <!-- Preserve narrow door frames and table legs while rejecting isolated
+             RealSense speckles after the 4 cm voxel filter. -->
+        <param name="map_ros/obstacle_outlier_radius" value="0.15"/>
+        <param name="map_ros/obstacle_outlier_min_neighbors" value="3"/>
         <!-- RealSense D435i depth is typically TYPE_16UC1 in millimeters. -->
         <param name="map_ros/k_depth_scaling_factor" value="1000.0"/>
         <param name="map_ros/depth_is_normalized" value="false"/>
@@ -96,10 +102,27 @@
         <param name="fsm/replan_time" value="0.30" type="double"/>
         <param name="fsm/replan_traj_end_threshold" value="1.0" type="double"/>
         <param name="fsm/replan_frontier_change_delay" value="0.6" type="double"/>
-        <param name="fsm/replan_on_frontier_change" value="true" type="bool"/>
+        <!-- Frontier cells fluctuate on every depth update near a doorway. Keep
+             the active local trajectory until its endpoint or a safety fault. -->
+        <param name="fsm/replan_on_frontier_change" value="false" type="bool"/>
         <param name="fsm/replan_timeout" value="10.0" type="double"/>
         <param name="fsm/local_target_distance" value="1.5" type="double"/>
-        <param name="fsm/local_target_max_yaw_error" value="1.57079632679" type="double"/>
+        <!-- Do not let the local target cross the first >=45 degree path bend.
+             Approach that corner with the incoming heading, stop, then plan the
+             outgoing segment. -->
+        <param name="fsm/local_target_corner_angle" value="0.785398163397" type="double"/>
+        <param name="fsm/corner_replan_end_threshold" value="0.05" type="double"/>
+        <!-- This is an action-selection threshold, not a local-target rejection
+             threshold. A safe point at any bearing is accepted; above 45 degrees
+             Go2 stops, checks the full rectangular rotation sweep, then aligns. -->
+        <param name="fsm/rotation_before_translate_yaw_error" value="0.785398163397" type="double"/>
+        <!-- Match traj_server/rotation_tolerance.  0.10 rad (5.7 deg) avoids
+             getting stuck on the Go2 yaw-command deadband at the end of a turn. -->
+        <param name="fsm/rotation_tolerance" value="0.10" type="double"/>
+        <param name="fsm/rotation_settle_time" value="0.10" type="double"/>
+        <param name="fsm/rotation_timeout" value="10.0" type="double"/>
+        <param name="fsm/rotation_footprint_step" value="0.174532925199" type="double"/>
+        <param name="fsm/plan_failure_retry_delay" value="0.50" type="double"/>
         <param name="fsm/tracking_abort_distance" value="0.50" type="double"/>
         <param name="fsm/visualize_objects" value="true" type="bool"/>
 
@@ -111,10 +134,14 @@
         <param name="exploration/max_to_mean_percentage" value="0.90" type="double"/>
         <param name="exploration/tsp_dir" value="$(find lkh_mtsp_solver)/resource" type="string"/>
 
-        <param name="frontier/cluster_min" value="5" type="int"/>
+        <!-- Reject short depth artefacts while retaining fragmented doorway and
+             corridor frontiers produced by the forward-facing D435i. -->
+        <param name="frontier/cluster_min" value="8" type="int"/>
         <param name="frontier/cluster_size_xy" value="0.65" type="double"/>
         <param name="frontier/min_view_finish_fraction" value="0.2" type="double"/>
         <param name="frontier/min_contain_unknown" value="30" type="int"/>
+        <param name="frontier/min_candidate_unknown" value="30" type="int"/>
+        <param name="frontier/force_dormant_match_distance" value="0.50" type="double"/>
         <param name="frontier/real_world_exclusion_radius" value="0.65" type="double"/>
 
         <param name="object/min_observation_num" value="2" type="int"/>
@@ -132,8 +159,18 @@
         <!-- path searching -->
         <param name="astar/lambda_heu" value="1.0" type="double"/>
         <param name="astar/resolution_astar" value="0.1" type="double"/>
+        <!-- This 2D map treats unobserved cells as ESDF obstacles. A circular
+             body bound would close the narrow, freshly observed camera cone at
+             startup, so A* uses raw occupied cells plus map inflation here.
+             KinoAstar still checks Go2's oriented rectangular footprint. -->
+        <param name="astar/footprint_clearance" value="0.0" type="double"/>
+        <!-- Planning starts at the Go2 body center while the observed free map
+             starts at the D435i lens 0.345 m ahead. Allow enough bounded startup
+             escape to bridge that known sensor lever arm plus grid margin. -->
+        <param name="astar/start_clearance_grace" value="0.45" type="double"/>
         <param name="astar/preferred_clearance" value="0.22" type="double"/>
         <param name="astar/wall_penalty_weight" value="6.0" type="double"/>
+        <param name="astar/shortcut_max_segment" value="0.75" type="double"/>
         <param name="kinoastar/unknown_as_collision" value="false" type="bool"/>
     </node>
 

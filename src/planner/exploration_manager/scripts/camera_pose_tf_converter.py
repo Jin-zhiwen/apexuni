@@ -133,7 +133,15 @@ class CameraPoseTfConverter:
                 msg.twist.twist.angular.z,
             ])
             camera_rot_from_base = camera_offset_rot.inv()
-            camera_linear = camera_rot_from_base.apply(base_linear)
+            # Changing the odometry origin also changes its linear velocity.
+            # v_output@output_origin = R_output_base *
+            #     (v_input@input_origin + omega_input x input_to_output_offset)
+            # Without this lever-arm term, an in-place Go2 turn still appears as
+            # a lateral body velocity when the input odometry origin is the lens.
+            output_origin_linear_in_base = (
+                base_linear + np.cross(base_angular, camera_offset)
+            )
+            camera_linear = camera_rot_from_base.apply(output_origin_linear_in_base)
             camera_angular = camera_rot_from_base.apply(base_angular)
 
             camera_odom.twist.twist.linear.x = camera_linear[0]

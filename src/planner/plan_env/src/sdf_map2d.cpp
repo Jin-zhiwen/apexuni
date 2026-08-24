@@ -48,13 +48,14 @@ void SDFMap2D::initMap(ros::NodeHandle& nh)
   mp_->map_max_boundary_ = mp_->map_origin_ + mp_->map_size_;
 
   // Load raycasting parameters for probabilistic occupancy fusion
-  nh.param("sdf_map/p_hit", mp_->p_hit_, 0.70);
-  nh.param("sdf_map/p_miss", mp_->p_miss_, 0.35);
+  nh.param("sdf_map/p_hit", mp_->p_hit_, 0.90);
+  nh.param("sdf_map/p_miss", mp_->p_miss_, 0.48);
   nh.param("sdf_map/p_min", mp_->p_min_, 0.12);
   nh.param("sdf_map/p_max", mp_->p_max_, 0.97);
   nh.param("sdf_map/p_occ", mp_->p_occ_, 0.80);
   nh.param("sdf_map/max_ray_length", mp_->max_ray_length_, -0.1);
   nh.param("sdf_map/ray_stop_dilation", mp_->ray_stop_dilation_, 0);
+  nh.param("sdf_map/stop_at_persistent_occupancy", mp_->stop_at_persistent_occupancy_, true);
 
   // Check if using habitat simulator and override parameters if necessary
   bool is_real_world;
@@ -85,7 +86,9 @@ void SDFMap2D::initMap(ros::NodeHandle& nh)
   mp_->clamp_max_log_ = logit(mp_->p_max_);
   mp_->min_occupancy_log_ = logit(mp_->p_occ_);
   mp_->unknown_flag_ = 0.01;
-  ROS_INFO("prob_hit_log = %f, prob_miss_log = %f", mp_->prob_hit_log_, mp_->prob_miss_log_);
+  ROS_INFO("prob_hit_log = %f, prob_miss_log = %f, persistent_ray_stop = %s",
+      mp_->prob_hit_log_, mp_->prob_miss_log_,
+      mp_->stop_at_persistent_occupancy_ ? "true" : "false");
 
   // Initialize map data structures and buffers
   mp_->buffer_size_ = mp_->map_voxel_num_(0) * mp_->map_voxel_num_(1);
@@ -170,7 +173,8 @@ void SDFMap2D::inputObjectCloud2D(
 }
 
 void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
-    const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
+    const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points,
+    const pcl::PointCloud<pcl::PointXY>::Ptr& ray_stop_points, const Eigen::Vector3d& camera_pos,
     vector<Eigen::Vector2i>& free_grids,
     vector<Eigen::Vector2i>* semantic_free_grids)
 {
@@ -179,7 +183,8 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
     semantic_free_grids->clear();
   int occupied_point_num = occupied_points->points.size();
   int raycast_point_num = raycast_points->points.size();
-  if (occupied_point_num == 0 && raycast_point_num == 0)
+  int ray_stop_point_num = ray_stop_points->points.size();
+  if (occupied_point_num == 0 && raycast_point_num == 0 && ray_stop_point_num == 0)
     return;
     
   // Initialize raycast tracking and clear occupancy updates
@@ -204,12 +209,13 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
   Eigen::Vector2i idx;
   int vox_adr;
   double length;
-  std::unordered_map<int, char> flag_occ, flag_occ_stop, flag_free;
+  std::unordered_map<int, char> flag_occ, flag_occ_stop, flag_occ_stop_core, flag_free;
   std::unordered_map<int, char> flag_semantic_rayend, flag_semantic_free;
 
   auto markRayStop = [&](const Eigen::Vector2i& stop_idx) {
     int stop_adr = toAddress(stop_idx);
     flag_occ_stop[stop_adr] = 1;
+    flag_occ_stop_core[stop_adr] = 1;
 
     if (mp_->ray_stop_dilation_ <= 0)
       return;
@@ -258,6 +264,21 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
       flag_occ[vox_adr] = 1;  // Mark as occupied in hash map
       markRayStop(idx);
     }
+  }
+
+  // Even obstacle-height candidates rejected as isolated noise remain a
+  // current-frame visibility barrier. They do not add occupied evidence, but
+  // they prevent neighboring floor/ceiling rays from clearing through the same
+  // 2D wall or door-frame location.
+  for (int i = 0; i < ray_stop_point_num; ++i) {
+    const auto& pt = ray_stop_points->points[i];
+    pt_w << pt.x, pt.y;
+    if (!isInMap(pt_w))
+      continue;
+    if ((pt_w - sensor_pos).norm() > mp_->max_ray_length_)
+      continue;
+    posToIndex(pt_w, idx);
+    markRayStop(idx);
   }
 
   // Semantic obstacle rays use obstacle-height endpoints. MapROS can still use
@@ -368,15 +389,31 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
       // Ray mode 0: Cast from point to sensor
       caster_->input(pt_w, sensor_pos);
       caster_->nextId(idx);
-      setCacheOccupancy(toAddress(idx), 0);
-      if (!flag_free.count(toAddress(idx))) {
-        flag_free[toAddress(idx)] = 1;
-        free_grids.push_back(idx);
+      int adr = toAddress(idx);
+      bool stopped = flag_occ_stop_core.count(adr) && flag_occ_stop_core[adr] == 1;
+      if (!stopped) {
+        setCacheOccupancy(adr, 0);
+        if (!flag_free.count(adr)) {
+          flag_free[adr] = 1;
+          free_grids.push_back(idx);
+        }
       }
-      while (caster_->nextId(idx)) {
-        int adr = toAddress(idx);
-        if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)  // Stop if hit occupied grid
+      while (!stopped && caster_->nextId(idx)) {
+        adr = toAddress(idx);
+        // Stop if this cell belongs to the current-frame obstacle barrier.
+        if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1) {
+          stopped = true;
+          // Only a dilation-expanded stop cell may receive free evidence. The
+          // measured obstacle candidate itself must not be erased by this ray.
+          if (!flag_occ_stop_core.count(adr) || flag_occ_stop_core[adr] != 1) {
+            setCacheOccupancy(adr, 0);
+            if (!flag_free.count(adr)) {
+              flag_free[adr] = 1;
+              free_grids.push_back(idx);
+            }
+          }
           break;
+        }
         if (md_->virtual_ground_buffer_[adr])  // Skip virtual ground
           continue;
         setCacheOccupancy(adr, 0);
@@ -385,10 +422,13 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
           free_grids.push_back(idx);
         }
       }
-      setCacheOccupancy(toAddress(idx), 0);
-      if (!flag_free.count(toAddress(idx))) {
-        flag_free[toAddress(idx)] = 1;
-        free_grids.push_back(idx);
+      if (!stopped) {
+        adr = toAddress(idx);
+        setCacheOccupancy(adr, 0);
+        if (!flag_free.count(adr)) {
+          flag_free[adr] = 1;
+          free_grids.push_back(idx);
+        }
       }
     }
     else {
@@ -397,7 +437,8 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
       while (caster_->nextId(idx)) {
         int adr = toAddress(idx);
         if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1) {  // Stop if hit occupied grid
-          if (flag_occ.count(adr) && flag_occ[adr] == 1)
+          if ((flag_occ.count(adr) && flag_occ[adr] == 1) ||
+              (flag_occ_stop_core.count(adr) && flag_occ_stop_core[adr] == 1))
             break;
           // Dilation-expanded stop cells are not true obstacle hits. Clear them once
           // so the robot-side wall boundary does not remain permanently unknown.
@@ -410,6 +451,18 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
         }
         if (md_->virtual_ground_buffer_[adr])  // Stop at virtual ground
           break;
+
+        // A valid endpoint behind an existing occupied cell is negative evidence
+        // for that cell, not evidence that space behind it is visible. Apply one
+        // miss update and stop. Repeated consistent misses can still clear a
+        // moved obstacle through log-odds decay without opening a ray through a
+        // wall after one degraded D435i frame.
+        if (mp_->stop_at_persistent_occupancy_ &&
+            md_->occupancy_buffer_[adr] > mp_->min_occupancy_log_) {
+          setCacheOccupancy(adr, 0);
+          break;
+        }
+
         setCacheOccupancy(adr, 0);
         if (!flag_free.count(adr)) {
           flag_free[adr] = 1;
@@ -440,16 +493,17 @@ void SDFMap2D::inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occup
   while (!md_->cache_voxel_.empty()) {
     int adr = md_->cache_voxel_.front();
     md_->cache_voxel_.pop();
-    
+
     // Determine log-odds update based on hit/miss ratio
     double log_odds_update =
         md_->count_hit_[adr] >= md_->count_miss_[adr] ? mp_->prob_hit_log_ : mp_->prob_miss_log_;
     md_->count_hit_[adr] = md_->count_miss_[adr] = 0;
-    
-    // Start newly observed voxels from a neutral prior so a single spurious hit
-    // does not immediately flip large unknown regions to occupied.
+
+    // Start at the occupancy threshold. With a conservative sensor model, one
+    // coherent obstacle observation becomes occupied while a free observation
+    // becomes free; subsequent evidence then supplies temporal hysteresis.
     if (md_->occupancy_buffer_[adr] < mp_->clamp_min_log_ - 1e-3)
-      md_->occupancy_buffer_[adr] = 0.0;
+      md_->occupancy_buffer_[adr] = mp_->min_occupancy_log_;
 
     // Update occupancy with clamping
     double last_occupancy = md_->occupancy_buffer_[adr];

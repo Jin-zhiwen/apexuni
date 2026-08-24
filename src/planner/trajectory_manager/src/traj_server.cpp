@@ -24,8 +24,15 @@ public:
     target_yaw_ = 0.0;
     bool need_init;
     nh.param("need_init", need_init, false);
+    nh.param("init_rotation_omega", init_rotation_omega_, M_PI / 3.0);
+    nh.param("init_odom_warmup", init_odom_warmup_, 3.0);
+    nh.param("init_rotation_timeout", init_rotation_timeout_, 10.0);
+    nh.param("init_odom_timeout", init_odom_timeout_, 1.5);
+    nh.param("init_no_progress_timeout", init_no_progress_timeout_, 1.5);
     nh.param("max_correction_vel", max_correction_vel_, 0.6);
     nh.param("max_correction_omega", max_correction_omega_, 1.2);
+    nh.param("rotation_tolerance", rotation_tolerance_, 0.10);
+    nh.param("min_rotation_omega", min_rotation_omega_, 0.25);
     nh.param("tracking_slowdown_error", tracking_slowdown_error_, 0.20);
     nh.param("tracking_stop_error", tracking_stop_error_, 0.55);
     nh.param("tracking_min_speed_scale", tracking_min_speed_scale_, 0.25);
@@ -57,6 +64,7 @@ public:
 
     if (need_init) {
       init_state_ = 0;
+      init_warmup_started_ = false;
       init_rotation_started_ = false;
       rotation_accum_ = 0.0;
       last_odom_yaw_ = 0.0;
@@ -71,26 +79,63 @@ public:
       case 0: {
         // Prefer odom-based rotation stop: accumulate yaw change from odom
         if (have_odom_) {
+          const ros::WallTime now_wall = ros::WallTime::now();
+          if ((now_wall - last_odom_wall_time_).toSec() > init_odom_timeout_) {
+            abortInitialRotation("VIO odometry became stale");
+            return;
+          }
+
           if (!init_rotation_started_) {
+            if (!init_warmup_started_) {
+              init_warmup_started_ = true;
+              init_warmup_start_wall_time_ = now_wall;
+            }
+
+            const double warmup_elapsed = (now_wall - init_warmup_start_wall_time_).toSec();
+            if (warmup_elapsed < init_odom_warmup_) {
+              publishZeroVelocity();
+              ROS_INFO_THROTTLE(1.0,
+                  "[traj_server] Holding still for VIO warmup: %.1f / %.1f s",
+                  warmup_elapsed, init_odom_warmup_);
+              return;
+            }
+
             last_odom_yaw_ = odom_yaw_;
             rotation_accum_ = 0.0;
             init_rotation_started_ = true;
+            init_rotation_start_wall_time_ = now_wall;
+            init_last_progress_wall_time_ = now_wall;
           }
 
-          // publish rotation command
-          twist_msg.angular.z = M_PI / 3;  // rotation speed
-          vel_cmd_pub_.publish(twist_msg);
+          if ((now_wall - init_rotation_start_wall_time_).toSec() > init_rotation_timeout_) {
+            abortInitialRotation("initial scan exceeded its time limit");
+            return;
+          }
 
           // accumulate yaw change using shortest-angle difference
           double delta = atan2(sin(odom_yaw_ - last_odom_yaw_), cos(odom_yaw_ - last_odom_yaw_));
           rotation_accum_ += fabs(delta);
           last_odom_yaw_ = odom_yaw_;
+          if (fabs(delta) >= 0.005) {
+            init_last_progress_wall_time_ = now_wall;
+          }
+          else if ((now_wall - init_last_progress_wall_time_).toSec() >
+                   init_no_progress_timeout_) {
+            abortInitialRotation("VIO yaw stopped making progress");
+            return;
+          }
 
           // Stop after approximately one full rotation
           if (rotation_accum_ >= 2.0 * M_PI - 0.05) {
             twist_msg.angular.z = 0.0;
             vel_cmd_pub_.publish(twist_msg);
             init_state_++;
+          }
+          else {
+            // Mapping density is controlled by Kimera's bounded keyframe
+            // interval, so the original one-revolution speed can be used.
+            twist_msg.angular.z = init_rotation_omega_;
+            vel_cmd_pub_.publish(twist_msg);
           }
         }
         else {
@@ -141,15 +186,28 @@ public:
       dura[i] = msg->duration[i];
     }
 
-    traj_.reset(new Trajectory<7, 3>(dura, cMats));
-    start_time_ = msg->start_time;
-    traj_duration_ = traj_->getTotalDuration();
-    traj_id_ = msg->traj_id;
-    receive_traj_ = true;
+    std::unique_ptr<Trajectory<7, 3>> new_traj(new Trajectory<7, 3>(dura, cMats));
+    const ros::Time now = ros::Time::now();
+    const bool active_traj = receive_traj_ && traj_ &&
+        (now - start_time_).toSec() < traj_duration_;
+    const bool starts_in_future = (msg->start_time - now).toSec() > 0.01;
 
-    std::cout << "[traj_server] Received trajectory ID " << traj_id_
-              << ", total duration: " << traj_duration_ << ", start_time: " << start_time_.toSec()
-              << std::endl;
+    // Do not replace a running trajectory with one that starts in the future.
+    // Replacing it would make cmdCallBack() return during the waiting period,
+    // which appears on Go2 as a stop and creates a visible odometry offset at
+    // the old/new trajectory handoff. Keep the old trajectory active and swap
+    // the replacement atomically when its start time arrives.
+    if (active_traj && starts_in_future) {
+      pending_traj_ = std::move(new_traj);
+      pending_start_time_ = msg->start_time;
+      pending_traj_id_ = msg->traj_id;
+      ROS_INFO("[traj_server] Queued trajectory ID %d, starts in %.3f s; keeping active trajectory.",
+          pending_traj_id_, (pending_start_time_ - now).toSec());
+      return;
+    }
+
+    pending_traj_.reset();
+    activateTrajectory(std::move(new_traj), msg->start_time, msg->traj_id);
   }
 
   void odometryCallback(const nav_msgs::OdometryConstPtr& msg)
@@ -170,7 +228,24 @@ public:
     Eigen::Vector3d rot_x = odom_orient_.toRotationMatrix().block<3, 1>(0, 0);
     odom_yaw_ = atan2(rot_x(1), rot_x(0));
     have_odom_ = true;
-    // publishRobotMarker();
+    last_odom_wall_time_ = ros::WallTime::now();
+
+    const ros::Time odom_stamp = msg->header.stamp.isZero() ? ros::Time::now() : msg->header.stamp;
+    if (have_last_odom_sample_) {
+      const double dt = (odom_stamp - last_odom_stamp_).toSec();
+      const double step = (odom_pos_ - last_odom_pos_).head<2>().norm();
+      // At the configured Go2 speed a normal odometry sample cannot move this
+      // far. Report discontinuities instead of silently drawing them into the
+      // blue /travel_traj history.
+      if (dt > 0.0 && dt < 0.5 && step > 0.20) {
+        ROS_WARN_THROTTLE(1.0,
+            "[traj_server] Odom position jump %.3f m in %.3f s; blue /travel_traj may show an offset.",
+            step, dt);
+      }
+    }
+    last_odom_stamp_ = odom_stamp;
+    last_odom_pos_ = odom_pos_;
+    have_last_odom_sample_ = true;
     traj_real_.push_back(Eigen::Vector3d(odom_pos_(0), odom_pos_(1), 0.15));
     if (traj_real_.size() > 50000)
       traj_real_.erase(traj_real_.begin(), traj_real_.begin() + 10000);
@@ -179,19 +254,32 @@ public:
   void stopCallback(const std_msgs::EmptyConstPtr& msg)
   {
     // Immediate emergency stop
-    ros::Time time_now = ros::Time::now();
-    double t_stop = (time_now - start_time_).toSec();
-    traj_duration_ = min(t_stop, traj_duration_);
+    if (receive_traj_) {
+      const double t_stop = (ros::Time::now() - start_time_).toSec();
+      traj_duration_ = min(t_stop, traj_duration_);
+    }
     receive_traj_ = false;
+    pending_traj_.reset();
+    has_target_angle_ = false;
+    init_cmd_timer_.stop();
+    init_warmup_started_ = false;
+    init_rotation_started_ = false;
+    init_state_ = 2;
 
     publishZeroVelocity();
   }
 
   void targetAngleCallback(const std_msgs::Float32ConstPtr& msg)
   {
+    // A pure turn replaces any active polynomial trajectory.
+    receive_traj_ = false;
+    pending_traj_.reset();
+    publishZeroVelocity();
     target_yaw_ = msg->data;
     has_target_angle_ = true;
     rotation_start_time_ = ros::Time::now();
+    rotation_start_pos_ = odom_pos_;
+    rotation_start_pos_valid_ = have_odom_;
 
     ROS_INFO("Received target angle: %.3f radians (%.1f degrees)", target_yaw_,
         target_yaw_ * 180.0 / M_PI);
@@ -205,6 +293,15 @@ public:
 
   void cmdCallBack(const ros::TimerEvent& event)
   {
+    const ros::Time current_time = ros::Time::now();
+
+    // Activate a queued replacement exactly at its requested start time. Until
+    // then the currently active trajectory continues to command the robot.
+    if (pending_traj_ && current_time + ros::Duration(0.005) >= pending_start_time_) {
+      std::unique_ptr<Trajectory<7, 3>> replacement = std::move(pending_traj_);
+      activateTrajectory(std::move(replacement), pending_start_time_, pending_traj_id_);
+    }
+
     // Check for rotate-to-target-angle task
     if (has_target_angle_) {
       executeRotationToTarget();
@@ -215,7 +312,6 @@ public:
       return;
     }
 
-    ros::Time current_time = ros::Time::now();
     double elapsed_time = (current_time - start_time_).toSec();
 
     if (elapsed_time < 0)
@@ -352,6 +448,33 @@ public:
     vel_cmd_pub_.publish(twist_msg);
   }
 
+  void abortInitialRotation(const std::string& reason)
+  {
+    publishZeroVelocity();
+    init_cmd_timer_.stop();
+    init_warmup_started_ = false;
+    init_rotation_started_ = false;
+    init_state_ = 2;
+    ROS_ERROR("[traj_server] Initial rotation aborted: %s (progress %.1f deg). Robot stopped.",
+        reason.c_str(), rotation_accum_ * 180.0 / M_PI);
+  }
+
+  void activateTrajectory(
+      std::unique_ptr<Trajectory<7, 3>> new_traj,
+      const ros::Time& new_start_time,
+      int new_traj_id)
+  {
+    has_target_angle_ = false;
+    traj_ = std::move(new_traj);
+    start_time_ = new_start_time;
+    traj_duration_ = traj_->getTotalDuration();
+    traj_id_ = new_traj_id;
+    receive_traj_ = true;
+
+    ROS_INFO("[traj_server] Activated trajectory ID %d, total duration %.3f s, starts in %.3f s.",
+        traj_id_, traj_duration_, (start_time_ - ros::Time::now()).toSec());
+  }
+
   void executeRotationToTarget()
   {
     if (!have_odom_) {
@@ -362,10 +485,7 @@ public:
     double yaw_error =
         std::atan2(std::sin(target_yaw_ - odom_yaw_), std::cos(target_yaw_ - odom_yaw_));
 
-    // Angle threshold: consider target reached if below this
-    const double angle_threshold = 0.02;  // ~0.6 degrees
-
-    if (std::abs(yaw_error) < angle_threshold) {
+    if (std::abs(yaw_error) <= rotation_tolerance_) {
       // Target angle reached: stop rotating
       geometry_msgs::Twist twist_msg;
       twist_msg.linear.x = 0.0;
@@ -373,8 +493,11 @@ public:
       vel_cmd_pub_.publish(twist_msg);
 
       has_target_angle_ = false;
-      ROS_INFO("Reached target angle: %.3f radians (%.1f degrees)", target_yaw_,
-          target_yaw_ * 180.0 / M_PI);
+      const double xy_displacement = rotation_start_pos_valid_ ?
+          (odom_pos_ - rotation_start_pos_).head<2>().norm() : -1.0;
+      ROS_INFO("Reached target angle: %.3f radians (%.1f degrees), body XY displacement=%.3f m",
+          target_yaw_, target_yaw_ * 180.0 / M_PI, xy_displacement);
+      rotation_start_pos_valid_ = false;
       return;
     }
 
@@ -385,6 +508,9 @@ public:
     // Limit maximum angular velocity
     const double max_angular_velocity = max_correction_omega_;  // rad/s
     angular_velocity = std::max(-max_angular_velocity, std::min(max_angular_velocity, angular_velocity));
+    if (std::fabs(angular_velocity) < min_rotation_omega_) {
+      angular_velocity = std::copysign(min_rotation_omega_, yaw_error);
+    }
 
     // Send rotation command
     geometry_msgs::Twist twist_msg;
@@ -447,7 +573,7 @@ public:
     return limited_wz * yaw_scale;
   }
 
-  void publishRobotMarker()
+    void publishRobotMarker()
   {
     const double robot_height = 0.15;
     const double robot_radius = 0.18;
@@ -557,9 +683,12 @@ private:
 
   // Trajectory Data
   std::unique_ptr<Trajectory<7, 3>> traj_;
+  std::unique_ptr<Trajectory<7, 3>> pending_traj_;
   ros::Time start_time_;
+  ros::Time pending_start_time_;
   double traj_duration_;
   int traj_id_;
+  int pending_traj_id_;
   bool receive_traj_;
 
   bool use_mpc_ = true;
@@ -572,20 +701,36 @@ private:
   double target_yaw_;
   bool has_target_angle_;
   ros::Time rotation_start_time_;
+  Vector3d rotation_start_pos_ = Vector3d::Zero();
+  bool rotation_start_pos_valid_ = false;
 
   // Data
   Vector3d odom_pos_, odom_linear_vel_;
   Quaterniond odom_orient_;
   double odom_yaw_;
   bool have_odom_;
+  bool have_last_odom_sample_ = false;
+  ros::Time last_odom_stamp_;
+  Vector3d last_odom_pos_;
   double replan_time_ = 0.5;
   vector<Eigen::Vector3d> traj_real_;
   int init_state_;
   // init rotation: prefer odom-based stopping (accumulate yaw change);
+  bool init_warmup_started_;
   bool init_rotation_started_;
   double rotation_accum_;  // accumulated absolute yaw change (rad)
   double last_odom_yaw_;   // last odom yaw used for accumulation
+  ros::WallTime last_odom_wall_time_;
+  ros::WallTime init_warmup_start_wall_time_;
+  ros::WallTime init_rotation_start_wall_time_;
+  ros::WallTime init_last_progress_wall_time_;
+  double init_rotation_omega_;
+  double init_odom_warmup_;
+  double init_rotation_timeout_;
+  double init_odom_timeout_;
+  double init_no_progress_timeout_;
   double max_correction_vel_, max_correction_omega_;
+  double rotation_tolerance_, min_rotation_omega_;
   double tracking_slowdown_error_, tracking_stop_error_, tracking_min_speed_scale_;
   double tracking_min_effective_vx_;
 };

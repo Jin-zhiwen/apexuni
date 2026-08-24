@@ -34,6 +34,8 @@ void MapROS::init()
   node_.param("map_ros/filter_min_height", filter_min_height_, 0.5);
   node_.param("map_ros/filter_max_height", filter_max_height_, 0.88);
   node_.param("map_ros/object_process_min_pitch", object_process_min_pitch_, 1.5);
+  node_.param("map_ros/obstacle_outlier_radius", obstacle_outlier_radius_, 0.3);
+  node_.param("map_ros/obstacle_outlier_min_neighbors", obstacle_outlier_min_neighbors_, 35);
   node_.param("map_ros/k_depth_scaling_factor", k_depth_scaling_factor_, -1.0);
   node_.param("map_ros/depth_is_normalized", depth_is_normalized_, true);
   node_.param("map_ros/depth_unit_scale", depth_unit_scale_, 1.0);
@@ -54,6 +56,11 @@ void MapROS::init()
   node_.param("semantic/object_fov_weight", object_fov_weight_, 0.70);
   node_.param("semantic/object_fov_decay_tau", object_fov_decay_tau_, 3.0);
   node_.param("detector/cloud_max_age", detected_cloud_max_age_, 0.8);
+
+  ROS_INFO("[MapROS] obstacle filter: height=[%.2f, %.2f] m, outlier_radius=%.2f m, "
+           "min_neighbors=%d",
+      filter_min_height_, filter_max_height_, obstacle_outlier_radius_,
+      obstacle_outlier_min_neighbors_);
 
   // Handle Habitat simulator vs real-world configuration
   bool is_real_world;
@@ -78,6 +85,7 @@ void MapROS::init()
   depth_cloud_.reset(new PointCloud3D());
   filtered_depth_cloud2d_.reset(new PointCloud2D());
   raycast_depth_cloud2d_.reset(new PointCloud2D());
+  ray_stop_cloud2d_.reset(new PointCloud2D());
 
   // Pre-allocate point cloud vectors for efficiency
   proj_points_.resize(640 * 480 / (skip_pixel_ * skip_pixel_));
@@ -454,9 +462,11 @@ void MapROS::processDepthFrame(const sensor_msgs::ImageConstPtr& img,
   const double height_origin_z = heightFilterOriginZ();
   ROS_INFO_THROTTLE(1.0,
       "[MAP_DEBUG] depth encoding=%s, proj_points=%d, filtered_2d_points=%zu, "
+      "raycast_2d_points=%zu, ray_stop_2d_points=%zu, "
       "depth_range=[%.2f, %.2f], pose_depth_dt=%.3f, camera_z=%.3f, "
       "obstacle_z=[%.3f, %.3f]",
       img->encoding.c_str(), proj_points_cnt_, filtered_depth_cloud2d_->points.size(),
+      raycast_depth_cloud2d_->points.size(), ray_stop_cloud2d_->points.size(),
       depth_filter_mindist_, depth_filter_maxdist_, pose_depth_dt, camera_pos_(2),
       height_origin_z + filter_min_height_, height_origin_z + filter_max_height_);
 
@@ -464,7 +474,7 @@ void MapROS::processDepthFrame(const sensor_msgs::ImageConstPtr& img,
   vector<Eigen::Vector2i> free_grids;
   vector<Eigen::Vector2i> semantic_free_grids;
   map_->inputDepthCloud2D(
-      filtered_depth_cloud2d_, raycast_depth_cloud2d_, camera_pos_, free_grids,
+      filtered_depth_cloud2d_, raycast_depth_cloud2d_, ray_stop_cloud2d_, camera_pos_, free_grids,
       &semantic_free_grids);
   // inputDepthCloud2D fills free_grids; dilate afterwards to close small visual
   // gaps between sparse depth rays in the semantic view-level sector.
@@ -611,6 +621,7 @@ void MapROS::filterPointCloudToXY()
   auto t1 = ros::Time::now();
   PointCloud3D::Ptr filtered_cloud_3d(new PointCloud3D());
   PointCloud3D::Ptr down_depth_cloud_3d(new PointCloud3D());
+  PointCloud3D::Ptr non_obstacle_raycast_cloud_3d(new PointCloud3D());
   PointCloud3D::Ptr under_ground_cloud_3d(new PointCloud3D());
   PointCloud2D::Ptr under_ground_cloud_2d(new PointCloud2D());
 
@@ -622,6 +633,7 @@ void MapROS::filterPointCloudToXY()
 
   filtered_depth_cloud2d_->clear();
   raycast_depth_cloud2d_->clear();
+  ray_stop_cloud2d_->clear();
 
   // Separate points by height categories
   for (int i = 0; i < (int)down_depth_cloud_3d->points.size(); i++) {
@@ -630,27 +642,32 @@ void MapROS::filterPointCloudToXY()
     pt.y = down_depth_cloud_3d->points[i].y;
     pt.z = down_depth_cloud_3d->points[i].z;
 
-    Point2D ray_pt_xy;
-    ray_pt_xy.x = pt.x;
-    ray_pt_xy.y = pt.y;
-    raycast_depth_cloud2d_->points.push_back(ray_pt_xy);
-
     // Points below virtual ground (for virtual ground generation)
     if (down_depth_cloud_3d->points[i].z < cur_floor_height + virtual_ground)
       under_ground_cloud_3d->points.push_back(pt);
     // Points in obstacle height range
     else if (down_depth_cloud_3d->points[i].z > cur_floor_height + filter_min_height_ &&
-             down_depth_cloud_3d->points[i].z < cur_floor_height + filter_max_height_)
+             down_depth_cloud_3d->points[i].z < cur_floor_height + filter_max_height_) {
+      Point2D stop_pt_xy;
+      stop_pt_xy.x = pt.x;
+      stop_pt_xy.y = pt.y;
+      ray_stop_cloud2d_->points.push_back(stop_pt_xy);
       filtered_cloud_3d->points.push_back(pt);
+    }
+    else
+      non_obstacle_raycast_cloud_3d->points.push_back(pt);
   }
 
   pcl::RadiusOutlierRemoval<Point3D> outrem;
 
-  // Remove outliers from obstacle points (handles noisy depth data from datasets)
-  if (!filtered_cloud_3d->points.empty()) {
+  // Obstacle-height returns must pass this filter before they can either add an
+  // occupied endpoint or clear a ray. Keeping those two sets consistent avoids
+  // turning a rejected door frame or wall edge into a ray that erases the wall.
+  if (!filtered_cloud_3d->points.empty() && obstacle_outlier_radius_ > 0.0 &&
+      obstacle_outlier_min_neighbors_ > 0) {
     outrem.setInputCloud(filtered_cloud_3d);
-    outrem.setRadiusSearch(0.3);         // Search radius for neighbors
-    outrem.setMinNeighborsInRadius(35);  // Minimum neighbor threshold
+    outrem.setRadiusSearch(obstacle_outlier_radius_);
+    outrem.setMinNeighborsInRadius(obstacle_outlier_min_neighbors_);
     outrem.filter(*filtered_cloud_3d);
   }
 
@@ -663,6 +680,20 @@ void MapROS::filterPointCloudToXY()
     pt_xy.y = pt.y;
     filtered_depth_cloud2d_->points.push_back(pt_xy);
   }
+
+  auto appendRaycastPoint = [&](const Point3D& pt) {
+    Point2D pt_xy;
+    pt_xy.x = pt.x;
+    pt_xy.y = pt.y;
+    raycast_depth_cloud2d_->points.push_back(pt_xy);
+  };
+
+  // Floor/ceiling returns only provide free-space evidence. Obstacle-height
+  // returns provide the same ray only after surviving the obstacle filter.
+  for (const auto& pt : non_obstacle_raycast_cloud_3d->points)
+    appendRaycastPoint(pt);
+  for (const auto& pt : filtered_cloud_3d->points)
+    appendRaycastPoint(pt);
 
   // Remove outliers from under-ground points (handles noisy depth data)
   if (!under_ground_cloud_3d->points.empty()) {

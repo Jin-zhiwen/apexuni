@@ -18,6 +18,7 @@
 #include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <std_msgs/Float64.h>
+#include <std_msgs/Float32.h>
 #include <std_msgs/Int32.h>
 #include <std_msgs/Empty.h>
 #include <std_msgs/String.h>
@@ -84,6 +85,7 @@ namespace RealFSM {
     INIT,
     WAIT_TRIGGER,
     PLAN_TRAJ,           // Plan continuous trajectory
+    ROTATE_TO_PATH,      // Stop, align to the selected path, then replan
     EXEC_TRAJ,           // Executing trajectory
     REPLAN,              // Replanning during execution
     FINISH
@@ -103,7 +105,8 @@ namespace RealFSM {
 enum class TrajPlannerResult {
   FAILED = 0,        // Trajectory planning failed
   SUCCESS = 1,       // Trajectory planned successfully
-  MISSION_COMPLETE = 2  // Mission completed (no frontier or reached object)
+  NEED_ROTATION = 2, // Safe local target requires an in-place heading alignment
+  MISSION_COMPLETE = 3  // Mission completed (no frontier or reached object)
 };
 
 // Real-world exploration FSM for continuous trajectory execution
@@ -132,7 +135,11 @@ private:
   // Real-world specific: trajectory control publishers
   ros::Publisher poly_traj_pub_;   // Publish polynomial trajectory
   ros::Publisher stop_pub_;        // Emergency stop signal
+  ros::Publisher target_angle_pub_;
   bool visualize_object_markers_ = false;
+  double robot_marker_length_ = 0.70;
+  double robot_marker_width_ = 0.30;
+  double robot_marker_height_ = 0.40;
 
   /* LightGlue Stop Gate Verification */
   std::string insinav_stop_verified_status_;  // Track LightGlue verification status
@@ -144,7 +151,33 @@ private:
   bool lightglue_close_stop_candidate_active_ = false;
   double tracking_abort_distance_ = FSMConstantsReal::DEFAULT_TRACKING_ABORT_DISTANCE;
   double tracking_replan_odom_distance_ = 0.20;
-  double local_target_max_yaw_error_ = 1.57079632679;
+  double local_target_corner_angle_ = 0.7853981633974483;
+  double corner_replan_end_threshold_ = 0.05;
+  double rotation_before_translate_yaw_error_ = 0.7853981633974483;
+  // Match traj_server's pure-yaw completion threshold.  A Go2 commanded through
+  // SportClient has a practical low-speed yaw deadband, so do not require
+  // sub-degree convergence before handing control back to the trajectory planner.
+  double rotation_tolerance_ = 0.10;
+  double rotation_settle_time_ = 0.10;
+  double rotation_timeout_ = 10.0;
+  double rotation_footprint_step_ = 0.174532925199;
+  double plan_failure_retry_delay_ = 0.50;
+  double pending_rotation_yaw_ = 0.0;
+  Eigen::Vector2d pending_rotation_goal_ = Eigen::Vector2d::Zero();
+  std::vector<Eigen::Vector2d> pending_rotation_path_;
+  int pending_rotation_final_result_ = 0;
+  ros::Time rotation_command_time_;
+  ros::Time rotation_in_tolerance_time_;
+  ros::Time planning_retry_after_;
+  bool rotation_command_sent_ = false;
+  bool reuse_rotation_path_once_ = false;
+  // A trajectory planned while the previous one is close to its endpoint must
+  // be handed off from the current odometry pose immediately.  Otherwise the
+  // default future start time can leave traj_server with a zero-velocity gap.
+  bool plan_from_odom_ = true;
+  bool local_target_marker_valid_ = false;
+  bool local_target_is_corner_staging_ = false;
+  bool active_corner_approach_ = false;
   bool replan_on_frontier_change_ = false;
   bool pending_frontier_change_ = false;
   int planning_failure_count_ = 0;
@@ -157,6 +190,8 @@ private:
   void polyTraj2ROSMsg(const LocalTrajectory& local_traj, trajectory_manager::PolyTraj& poly_msg);
   bool selectLocalTarget(const Eigen::Vector2d& current_pos, const std::vector<Eigen::Vector2d>& path,
       const double& local_distance, Eigen::Vector2d& target_pos, double& target_yaw);
+  bool isInPlaceRotationSafe(
+      const Eigen::Vector2d& pos, double start_yaw, double target_yaw);
   
   // Safety and stuck detection
   void emergencyStop();

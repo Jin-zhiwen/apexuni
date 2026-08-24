@@ -7,7 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class MapRosRaycastEndpointsTest(unittest.TestCase):
-    def test_mapping_uses_all_depth_points_for_free_space_raycasting(self):
+    def test_mapping_keeps_obstacle_filter_and_raycast_endpoints_consistent(self):
         map_ros_header = (
             REPO_ROOT / "src" / "planner" / "plan_env" / "include" / "plan_env" / "map_ros.h"
         ).read_text()
@@ -19,12 +19,21 @@ class MapRosRaycastEndpointsTest(unittest.TestCase):
         ).read_text()
 
         self.assertIn("raycast_depth_cloud2d_", map_ros_header)
+        self.assertIn("ray_stop_cloud2d_", map_ros_header)
         self.assertIn("raycast_depth_cloud2d_->clear()", map_ros_source)
+        self.assertIn("ray_stop_cloud2d_->clear()", map_ros_source)
+        self.assertIn("non_obstacle_raycast_cloud_3d", map_ros_source)
+        self.assertIn("for (const auto& pt : filtered_cloud_3d->points)", map_ros_source)
+        obstacle_filter = map_ros_source.index("outrem.filter(*filtered_cloud_3d)")
+        append_filtered_rays = map_ros_source.index(
+            "for (const auto& pt : filtered_cloud_3d->points)", obstacle_filter
+        )
+        self.assertLess(obstacle_filter, append_filtered_rays)
         self.assertRegex(
             map_ros_source,
             re.compile(
                 r"map_->inputDepthCloud2D\(\s*filtered_depth_cloud2d_,\s*"
-                r"raycast_depth_cloud2d_,\s*camera_pos_,\s*free_grids,\s*"
+                r"raycast_depth_cloud2d_,\s*ray_stop_cloud2d_,\s*camera_pos_,\s*free_grids,\s*"
                 r"&semantic_free_grids\s*\)",
                 re.MULTILINE,
             ),
@@ -35,6 +44,10 @@ class MapRosRaycastEndpointsTest(unittest.TestCase):
         )
         self.assertIn(
             "const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points",
+            sdf_map_header,
+        )
+        self.assertIn(
+            "const pcl::PointCloud<pcl::PointXY>::Ptr& ray_stop_points",
             sdf_map_header,
         )
 
@@ -71,7 +84,7 @@ class MapRosRaycastEndpointsTest(unittest.TestCase):
             map_ros_source,
             re.compile(
                 r"inputDepthCloud2D\(\s*filtered_depth_cloud2d_,\s*"
-                r"raycast_depth_cloud2d_,\s*camera_pos_,\s*free_grids,\s*"
+                r"raycast_depth_cloud2d_,\s*ray_stop_cloud2d_,\s*camera_pos_,\s*free_grids,\s*"
                 r"&semantic_free_grids\s*\)",
                 re.MULTILINE,
             ),
@@ -127,6 +140,10 @@ class MapRosRaycastEndpointsTest(unittest.TestCase):
 
         self.assertIn('name="sdf_map/ray_mode" value="1"', launch_source)
         self.assertIn('name="sdf_map/ray_stop_dilation" value="1"', launch_source)
+        self.assertIn(
+            'name="sdf_map/stop_at_persistent_occupancy" value="true"',
+            launch_source,
+        )
 
         input_depth = sdf_map_source.split("void SDFMap2D::inputDepthCloud2D", 1)[1]
         input_depth = input_depth.split("void SDFMap2D::setForceOccGrid", 1)[0]
@@ -134,8 +151,12 @@ class MapRosRaycastEndpointsTest(unittest.TestCase):
         self.assertIn("Stop if hit occupied grid", input_depth)
         self.assertIn("flag_occ_stop", input_depth)
         self.assertIn("if (flag_occ_stop.count(adr) && flag_occ_stop[adr] == 1)", input_depth)
+        self.assertIn("md_->occupancy_buffer_[adr] > mp_->min_occupancy_log_", input_depth)
+        self.assertIn("setCacheOccupancy(adr, 0);\n          break;", input_depth)
+        self.assertIn("for (int i = 0; i < ray_stop_point_num; ++i)", input_depth)
+        self.assertIn("markRayStop(idx);", input_depth)
 
-    def test_dilated_stop_cells_are_cleared_before_breaking(self):
+    def test_core_stop_cells_are_preserved_while_dilated_cells_can_clear(self):
         sdf_map_source = (
             REPO_ROOT / "src" / "planner" / "plan_env" / "src" / "sdf_map2d.cpp"
         ).read_text()
@@ -145,10 +166,11 @@ class MapRosRaycastEndpointsTest(unittest.TestCase):
         ray_mode_one = input_depth.split("// Ray mode 1: Cast from sensor to point", 1)[1]
         stop_block = ray_mode_one.split("if (md_->virtual_ground_buffer_[adr])", 1)[0]
 
-        self.assertIn("if (flag_occ.count(adr) && flag_occ[adr] == 1)", stop_block)
+        self.assertIn("flag_occ_stop_core.count(adr)", stop_block)
+        self.assertIn("flag_occ_stop_core[adr] == 1", stop_block)
         self.assertIn("setCacheOccupancy(adr, 0);", stop_block)
         self.assertLess(
-            stop_block.index("if (flag_occ.count(adr) && flag_occ[adr] == 1)"),
+            stop_block.index("flag_occ_stop_core.count(adr)"),
             stop_block.index("setCacheOccupancy(adr, 0);"),
         )
 

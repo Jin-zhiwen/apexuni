@@ -137,6 +137,8 @@ private:
   double depth_filter_maxdist_, depth_filter_mindist_;  ///< Valid depth range for filtering
   double filter_min_height_, filter_max_height_;        ///< Height range for obstacle detection
   double object_process_min_pitch_;                     ///< Min camera pitch for object cloud processing
+  double obstacle_outlier_radius_;                      ///< Radius used to reject isolated obstacle returns
+  int obstacle_outlier_min_neighbors_;                  ///< Neighbor count required for an obstacle return
   int depth_filter_margin_;        ///< Margin pixels to ignore near image borders
   double k_depth_scaling_factor_;  ///< Depth value scaling factor for normalized depth
   bool depth_is_normalized_;       ///< Whether input depth is normalized [0,1]
@@ -161,6 +163,7 @@ private:
   PointCloud3D::Ptr depth_cloud_;             ///< Raw 3D point cloud from depth sensor
   PointCloud2D::Ptr filtered_depth_cloud2d_;  ///< Filtered 2D point cloud for occupancy mapping
   PointCloud2D::Ptr raycast_depth_cloud2d_;   ///< 2D endpoints used to clear observed free space
+  PointCloud2D::Ptr ray_stop_cloud2d_;        ///< Unfiltered obstacle-height endpoints that stop rays
 
   // Object detection and ITM integration
   int continue_over_depth_count_;  ///< Counter for maintaining over-depth object consistency

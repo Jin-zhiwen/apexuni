@@ -102,7 +102,8 @@ private:
   int cluster_min_;
   double cluster_size_xy_;
   double min_view_finish_fraction_, resolution_;
-  int min_contain_unknown_;
+  int min_contain_unknown_, min_candidate_unknown_;
+  double force_dormant_match_distance_;
   bool is_real_world_;
   double real_world_exclusion_radius_;
   bool have_latest_sensor_pos_;

@@ -53,10 +53,16 @@ public:
   std::vector<Eigen::Vector2d> getPath();
   std::vector<Eigen::Vector2d> getVisited();
   double getEarlyTerminateCost();
+  bool isPointSafe(const Eigen::Vector2d& pos, int safety_mode = SAFETY_MODE::NORMAL);
+  bool isSegmentSafe(const Eigen::Vector2d& from, const Eigen::Vector2d& to,
+      int safety_mode = SAFETY_MODE::NORMAL);
 
   double lambda_heu_;
   double preferred_clearance_;
   double wall_penalty_weight_;
+  // Extra ESDF clearance after map inflation. This keeps the point search
+  // conservative enough for the Go2 rectangular footprint.
+  double footprint_clearance_;
 
 private:
   void backtrack(const Node2DPtr& end_node, const Eigen::Vector2d& end);
@@ -65,7 +71,8 @@ private:
   double getManhHeu(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2);
   double getEuclHeu(const Eigen::Vector2d& x1, const Eigen::Vector2d& x2);
   double computeTraversalCost(const Eigen::Vector2d& from, const Eigen::Vector2d& to);
-  bool checkPointSafety(const Eigen::Vector2d& pos, int safety_mode);
+  bool checkPointSafety(
+      const Eigen::Vector2d& pos, int safety_mode, bool enforce_footprint_clearance = true);
 
   // main data structure
   std::vector<Node2DPtr> path_node_pool_;
@@ -80,6 +87,10 @@ private:
 
   // parameter
   double margin_;
+  // A depth map can temporarily mark the robot's own starting cell as
+  // unknown, occupied, or inflated. When that happens, permit only this
+  // bounded startup escape before normal map and footprint checks resume.
+  double start_clearance_grace_;
   int allocate_num_;
   double resolution_, inv_resolution_;
   Eigen::Vector2d map_size_2d_, origin_;

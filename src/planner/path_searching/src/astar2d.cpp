@@ -1,4 +1,6 @@
 #include <path_searching/astar2d.h>
+#include <algorithm>
+#include <cmath>
 #include <sstream>
 
 using namespace std;
@@ -30,6 +32,20 @@ void Astar2D::init(ros::NodeHandle& nh, const SDFMap2D::Ptr& sdf_map)
   nh.param("astar/lambda_heu", lambda_heu_, -1.0);
   nh.param("astar/preferred_clearance", preferred_clearance_, 0.25);
   nh.param("astar/wall_penalty_weight", wall_penalty_weight_, 3.0);
+  nh.param("astar/footprint_clearance", footprint_clearance_, -1.0);
+  nh.param("astar/start_clearance_grace", start_clearance_grace_, 0.25);
+  start_clearance_grace_ = std::max(0.0, start_clearance_grace_);
+  if (footprint_clearance_ < 0.0) {
+    double length = 0.70;
+    double width = 0.30;
+    double hard_collision_padding = 0.03;
+    nh.param("length", length, length);
+    nh.param("width", width, width);
+    nh.param("hard_collision_padding", hard_collision_padding, hard_collision_padding);
+    const double body_radius = 0.5 * std::hypot(length, width) + hard_collision_padding;
+    // The ESDF starts at the already-inflated obstacle boundary.
+    footprint_clearance_ = std::max(0.0, body_radius - sdf_map->getObstaclesInflation());
+  }
   allocate_num_ = 1000000;
 
   this->sdf_map_ = sdf_map;
@@ -39,6 +55,7 @@ void Astar2D::init(ros::NodeHandle& nh, const SDFMap2D::Ptr& sdf_map)
   sdf_map_->getRegion(origin_, map_size_2d_);
   cout << "origin_: " << origin_.transpose() << endl;
   cout << "map size: " << map_size_2d_.transpose() << endl;
+  ROS_INFO("[Astar2D] footprint clearance after map inflation: %.3f m", footprint_clearance_);
 
   path_node_pool_.resize(allocate_num_);
   for (int i = 0; i < allocate_num_; i++) path_node_pool_[i] = new Node2D;
@@ -71,6 +88,38 @@ void Astar2D::setResolution(const double& res)
 int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d& end_pt,
     double success_dist, double max_time, int safety_mode)
 {
+  if (!sdf_map_->isInMap(start_pt)) {
+    ROS_WARN("[Astar2D] Reject search: start is outside the map at (%.2f, %.2f).",
+        start_pt.x(), start_pt.y());
+    return NO_PATH;
+  }
+
+  // With a head-mounted depth camera, cells around the body can remain
+  // unknown or be inflated by a near-field return even while the stationary
+  // robot is physically safe. The original planner allowed a short escape
+  // from such a pose. Restrict that exception to this case and this radius;
+  // every sample after it still uses the full map and footprint tests.
+  const bool start_requires_escape = !checkPointSafety(start_pt, safety_mode, false);
+  if (start_requires_escape) {
+    ROS_WARN_THROTTLE(1.0,
+        "[Astar2D] Start (%.2f, %.2f) is not map-safe (occupancy=%d, inflated=%d); "
+        "allowing a bounded %.2f m startup escape.",
+        start_pt.x(), start_pt.y(), sdf_map_->getOccupancy(start_pt),
+        sdf_map_->getInflateOccupancy(start_pt), start_clearance_grace_);
+  }
+
+  int rejected_out_of_map = 0;
+  int rejected_occupied = 0;
+  int rejected_unknown = 0;
+  int rejected_clearance = 0;
+  auto logNoPath = [&]() {
+    ROS_WARN_THROTTLE(1.0,
+        "[Astar2D] No path from (%.2f, %.2f) to (%.2f, %.2f): expanded=%d, "
+        "rejected[out=%d, occupied_or_inflated=%d, unknown=%d, clearance=%d].",
+        start_pt.x(), start_pt.y(), end_pt.x(), end_pt.y(), iter_num_, rejected_out_of_map,
+        rejected_occupied, rejected_unknown, rejected_clearance);
+  };
+
   Node2DPtr cur_node = path_node_pool_[0];
   cur_node->parent = nullptr;
   cur_node->position = start_pt;
@@ -95,14 +144,17 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
     if ((cur_node->position - end_pt).norm() < success_dist)
       reach_end = true;
     if (reach_end) {
-      backtrack(cur_node, end_pt);
+      // A frontier endpoint can be unknown or too close to an obstacle. End
+      // at the safe node that reached the success radius instead of appending
+      // the unchecked requested endpoint to the path.
+      backtrack(cur_node, cur_node->position);
       return REACH_END;
     }
 
     // Early termination if time up
     if ((ros::Time::now() - t1).toSec() > max_time) {
       early_terminate_cost_ = cur_node->g_score + getDiagHeu(cur_node->position, end_pt);
-      // ROS_WARN("Astar Long Time");
+      logNoPath();
       return NO_PATH;
     }
 
@@ -118,26 +170,38 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
     for (auto step : steps) {
       nbr_pos = cur_pos + step;
 
-      // Skip safety raycast if still near start to avoid immediate termination
-      if ((nbr_pos - start_pt).norm() > 0.25) {
-        // Check safety
-        if (!checkPointSafety(nbr_pos, safety_mode))
-          continue;
-
-        bool safe = true;
-        Vector2d dir = nbr_pos - cur_pos;
-        double len = dir.norm();
-        dir.normalize();
-        for (double l = 0.025; l < len; l += 0.025) {
-          Vector2d ckpt = cur_pos + l * dir;
-          if (!checkPointSafety(ckpt, safety_mode)) {
-            safe = false;
-            break;
-          }
+      // A self-marked starting cell needs a short, bounded escape. Do not use
+      // the exception for an already map-safe start, and never permit leaving
+      // the map. Once outside the escape radius, all occupancy, unknown, and
+      // footprint-clearance checks apply again.
+      const Vector2d segment = nbr_pos - cur_pos;
+      const double segment_length = segment.norm();
+      const int sample_count = std::max(1,
+          static_cast<int>(std::ceil(segment_length / std::max(0.01, std::min(0.025, 0.5 * resolution_)))));
+      bool safe = true;
+      for (int i = 1; i <= sample_count; ++i) {
+        const Vector2d sample = cur_pos + segment * (static_cast<double>(i) / sample_count);
+        const bool in_startup_escape = start_requires_escape &&
+            (sample - start_pt).norm() <= start_clearance_grace_ + 1.0e-6;
+        if (!sdf_map_->isInMap(sample)) {
+          ++rejected_out_of_map;
+          safe = false;
+          break;
         }
-        if (!safe)
-          continue;
+        if (!in_startup_escape && !checkPointSafety(sample, safety_mode)) {
+          const int occupancy = sdf_map_->getOccupancy(sample);
+          if (sdf_map_->getInflateOccupancy(sample) == 1 || occupancy == SDFMap2D::OCCUPIED)
+            ++rejected_occupied;
+          else if (occupancy == SDFMap2D::UNKNOWN && safety_mode == SAFETY_MODE::NORMAL)
+            ++rejected_unknown;
+          else
+            ++rejected_clearance;
+          safe = false;
+          break;
+        }
       }
+      if (!safe)
+        continue;
 
       // Check not in close set
       Eigen::Vector2i nbr_idx;
@@ -171,6 +235,7 @@ int Astar2D::astarSearch(const Eigen::Vector2d& start_pt, const Eigen::Vector2d&
       open_set_map_[nbr_idx] = neighbor;
     }
   }
+  logNoPath();
   return NO_PATH;
 }
 
@@ -239,7 +304,8 @@ double Astar2D::computeTraversalCost(const Eigen::Vector2d& from, const Eigen::V
 
 void Astar2D::backtrack(const Node2DPtr& end_node, const Eigen::Vector2d& end)
 {
-  path_nodes_.push_back(end);
+  if ((end - end_node->position).norm() > 1.0e-6)
+    path_nodes_.push_back(end);
   path_nodes_.push_back(end_node->position);
   Node2DPtr cur_node = end_node;
   while (cur_node->parent != nullptr) {
@@ -275,7 +341,8 @@ double Astar2D::pathLength(const vector<Eigen::Vector2d>& path)
   return length;
 }
 
-bool Astar2D::checkPointSafety(const Eigen::Vector2d& pos, int safety_mode)
+bool Astar2D::checkPointSafety(
+    const Eigen::Vector2d& pos, int safety_mode, bool enforce_footprint_clearance)
 {
   // Outside map bounds is always unsafe
   if (!sdf_map_->isInMap(pos))
@@ -295,6 +362,38 @@ bool Astar2D::checkPointSafety(const Eigen::Vector2d& pos, int safety_mode)
   if (occ == SDFMap2D::UNKNOWN && safety_mode == SAFETY_MODE::NORMAL)
     return false;
 
+  if (enforce_footprint_clearance && footprint_clearance_ > 1.0e-6) {
+    Eigen::Vector2d grad;
+    if (sdf_map_->getDistWithGrad(pos, grad) < footprint_clearance_)
+      return false;
+  }
+
+  return true;
+}
+
+bool Astar2D::isPointSafe(const Eigen::Vector2d& pos, int safety_mode)
+{
+  return checkPointSafety(pos, safety_mode);
+}
+
+bool Astar2D::isSegmentSafe(
+    const Eigen::Vector2d& from, const Eigen::Vector2d& to, int safety_mode)
+{
+  if (!checkPointSafety(from, safety_mode) || !checkPointSafety(to, safety_mode))
+    return false;
+
+  const Eigen::Vector2d delta = to - from;
+  const double length = delta.norm();
+  if (length <= 1.0e-6)
+    return true;
+
+  const double sample_spacing = std::max(0.01, std::min(0.025, 0.5 * resolution_));
+  const int sample_count = std::max(1, static_cast<int>(std::ceil(length / sample_spacing)));
+  for (int i = 1; i < sample_count; ++i) {
+    const Eigen::Vector2d sample = from + delta * (static_cast<double>(i) / sample_count);
+    if (!checkPointSafety(sample, safety_mode))
+      return false;
+  }
   return true;
 }
 }  // namespace apexnav_planner

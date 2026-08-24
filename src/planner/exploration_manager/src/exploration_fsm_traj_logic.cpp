@@ -63,6 +63,31 @@ int selectLookaheadPathIndex(const Eigen::Vector2d& current_pos,
   return selected_idx;
 }
 
+double angleDifference(double lhs, double rhs)
+{
+  return std::atan2(std::sin(lhs - rhs), std::cos(lhs - rhs));
+}
+
+int findFollowingPathIndex(
+    const Eigen::Vector2d& current_pos, const std::vector<Eigen::Vector2d>& path)
+{
+  if (path.empty()) {
+    return -1;
+  }
+
+  int nearest_idx = 0;
+  double min_dist = std::numeric_limits<double>::max();
+  for (int i = 0; i < static_cast<int>(path.size()); ++i) {
+    const double dist = (path[i] - current_pos).norm();
+    if (dist < min_dist) {
+      min_dist = dist;
+      nearest_idx = i;
+    }
+  }
+
+  return std::min(nearest_idx + 1, static_cast<int>(path.size()) - 1);
+}
+
 }  // namespace
 
 bool shouldCompleteSearchObjectMission(int final_result,
@@ -206,23 +231,116 @@ bool selectFootprintSafeLocalTargetFromPath(const Eigen::Vector2d& current_pos,
   return false;
 }
 
+bool selectCornerAwareFootprintSafeLocalTargetFromPath(
+    const Eigen::Vector2d& current_pos,
+    const std::vector<Eigen::Vector2d>& path,
+    double local_distance,
+    double min_target_distance,
+    double max_path_heading_change,
+    const std::function<bool(const Eigen::Vector2d&, double)>& is_collision,
+    PathPoseCandidate& safe_pose,
+    bool& corner_limited)
+{
+  corner_limited = false;
+  const int selected_idx =
+      selectLookaheadPathIndex(current_pos, path, local_distance, min_target_distance);
+  if (selected_idx < 0) {
+    return false;
+  }
+
+  int candidate_idx = selected_idx;
+  double candidate_yaw = pathYawAtIndex(path, candidate_idx);
+  const int following_idx = findFollowingPathIndex(current_pos, path);
+  const double corner_threshold = std::max(
+      0.0, std::min(max_path_heading_change, 3.14159265358979323846));
+
+  if (following_idx >= 0 && following_idx < static_cast<int>(path.size()) &&
+      corner_threshold < 3.14159265358979323846 - 1.0e-6) {
+    Eigen::Vector2d initial_segment = path[following_idx] - current_pos;
+    if (initial_segment.norm() <= 1.0e-6 && following_idx + 1 < static_cast<int>(path.size())) {
+      initial_segment = path[following_idx + 1] - path[following_idx];
+    }
+
+    if (initial_segment.norm() > 1.0e-6) {
+      const double incoming_yaw = std::atan2(initial_segment.y(), initial_segment.x());
+      const int last_segment_start = std::min(
+          selected_idx, static_cast<int>(path.size()) - 2);
+      for (int i = following_idx; i <= last_segment_start; ++i) {
+        const Eigen::Vector2d segment = path[i + 1] - path[i];
+        if (segment.norm() <= 1.0e-6) {
+          continue;
+        }
+
+        const double segment_yaw = std::atan2(segment.y(), segment.x());
+        if (std::fabs(angleDifference(segment_yaw, incoming_yaw)) <=
+            corner_threshold + 1.0e-6) {
+          continue;
+        }
+
+        // Stop at the beginning of the first sharp segment and arrive with the
+        // incoming heading. KinoAstar can then approach the corner without
+        // smoothing across its inside edge.
+        if ((path[i] - current_pos).norm() >= min_target_distance) {
+          candidate_idx = i;
+          candidate_yaw = incoming_yaw;
+          corner_limited = true;
+        }
+        break;
+      }
+    }
+  }
+
+  for (int i = candidate_idx; i >= 0; --i) {
+    if ((path[i] - current_pos).norm() < min_target_distance) {
+      continue;
+    }
+
+    const double yaw = corner_limited && i == candidate_idx ?
+        candidate_yaw : pathYawAtIndex(path, i);
+    if (!is_collision(path[i], yaw)) {
+      safe_pose.pos = path[i];
+      safe_pose.yaw = yaw;
+      return true;
+    }
+  }
+
+  return false;
+}
+
 bool isLocalTargetFacingForward(
     const Eigen::Vector2d& current_pos,
     double current_yaw,
     const Eigen::Vector2d& target_pos,
     double max_yaw_error)
 {
+  const double clamped_limit =
+      std::max(0.0, std::min(max_yaw_error, 3.14159265358979323846));
+  return std::fabs(computeTargetYawError(current_pos, current_yaw, target_pos)) <=
+      clamped_limit + 1.0e-6;
+}
+
+double computeTargetYawError(
+    const Eigen::Vector2d& current_pos,
+    double current_yaw,
+    const Eigen::Vector2d& target_pos)
+{
   const Eigen::Vector2d delta = target_pos - current_pos;
   if (delta.norm() <= 1.0e-6) {
-    return true;
+    return 0.0;
   }
 
   const double target_yaw = std::atan2(delta.y(), delta.x());
-  const double yaw_error =
-      std::atan2(std::sin(target_yaw - current_yaw), std::cos(target_yaw - current_yaw));
-  const double clamped_limit =
-      std::max(0.0, std::min(max_yaw_error, 3.14159265358979323846));
-  return std::fabs(yaw_error) <= clamped_limit + 1.0e-6;
+  return std::atan2(
+      std::sin(target_yaw - current_yaw), std::cos(target_yaw - current_yaw));
+}
+
+bool shouldRotateBeforeTranslation(
+    double yaw_error,
+    double rotation_yaw_error_threshold)
+{
+  const double clamped_threshold = std::max(
+      0.0, std::min(rotation_yaw_error_threshold, 3.14159265358979323846));
+  return std::fabs(yaw_error) > clamped_threshold + 1.0e-6;
 }
 
 bool selectFootprintSafeForwardLocalTargetFromPath(const Eigen::Vector2d& current_pos,
@@ -257,6 +375,29 @@ bool selectFootprintSafeForwardLocalTargetFromPath(const Eigen::Vector2d& curren
   }
 
   return false;
+}
+
+bool isInPlaceRotationFootprintSafe(const Eigen::Vector2d& current_pos,
+    double start_yaw,
+    double target_yaw,
+    double max_yaw_step,
+    const std::function<bool(const Eigen::Vector2d&, double)>& is_collision)
+{
+  if (max_yaw_step <= 1.0e-6) {
+    return false;
+  }
+
+  const double yaw_delta =
+      std::atan2(std::sin(target_yaw - start_yaw), std::cos(target_yaw - start_yaw));
+  const int sample_count = std::max(
+      1, static_cast<int>(std::ceil(std::fabs(yaw_delta) / max_yaw_step)));
+  for (int i = 0; i <= sample_count; ++i) {
+    const double yaw = start_yaw + yaw_delta * static_cast<double>(i) / sample_count;
+    if (is_collision(current_pos, yaw)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 Eigen::Vector2d clampLocalTargetToLookahead(

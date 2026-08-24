@@ -48,6 +48,10 @@ void ExplorationManager::initialize(ros::NodeHandle& nh)
   nh.param("exploration/max_to_mean_percentage", ep_->max_to_mean_percentage_, 0.95);
   nh.param("exploration/tsp_dir", ep_->tsp_dir_, string("null"));
   nh.param("map_ros/frame_id", collision_marker_frame_id_, std::string("odom"));
+  nh.param("astar/shortcut_max_segment", path_shortcut_max_segment_, path_shortcut_max_segment_);
+  nh.param("fsm/local_target_distance", local_target_distance_, local_target_distance_);
+  path_shortcut_max_segment_ = std::max(0.05, path_shortcut_max_segment_);
+  local_target_distance_ = std::max(local_target_min_distance_, local_target_distance_);
   footprint_collision_marker_pub_ =
       nh.advertise<visualization_msgs::Marker>("/planning_vis/footprint_collision", 1, true);
 
@@ -189,6 +193,13 @@ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw
   return EXPLORATION;
 }
 
+bool ExplorationManager::replanPathToGoal(const Vector2d& start, const Vector2d& goal,
+    Vector2d& refined_goal, vector<Vector2d>& replanned_path)
+{
+  replanned_path.clear();
+  return searchFrontierPath(start, goal, refined_goal, replanned_path);
+}
+
 void ExplorationManager::setSkipObjectNavigationOnce(bool skip)
 {
   skip_object_navigation_once_ = skip;
@@ -200,17 +211,42 @@ bool ExplorationManager::searchFrontierPath(const Vector2d& start, const Vector2
   path_finder_->reset();
   if (path_finder_->astarSearch(start, end, 0.25, 0.01) == Astar2D::REACH_END) {
     refined_path = path_finder_->getPath();
+    if (refined_path.empty())
+      return false;
+
+    // Do not let a future endpoint-handling change reintroduce an unsafe
+    // frontier point into TSP or the local trajectory planner.
+    while (!refined_path.empty() && !path_finder_->isPointSafe(refined_path.back()))
+      refined_path.pop_back();
+    if (refined_path.empty())
+      return false;
+
     shortenPath(refined_path);
-    refined_pos = end;
-    for (int i = static_cast<int>(refined_path.size()) - 1; i >= 0; --i) {
-      const Vector2d& pos = refined_path[i];
-      if (sdf_map_->getOccupancy(pos) == SDFMap2D::FREE &&
-          sdf_map_->getInflateOccupancy(pos) != 1) {
-        refined_pos = pos;
-        break;
-      }
+
+    // Astar2D validates a traversable map point.  The real robot, however,
+    // needs a collision-free rectangular body pose at the same local
+    // lookahead point.  Reject this frontier here so the exploration policy
+    // can consider another visible frontier instead of failing later in the
+    // FSM after it has already committed to this path.
+    PathPoseCandidate local_pose;
+    const bool has_safe_local_pose = selectFootprintSafeLocalTargetFromPath(
+        start,
+        refined_path,
+        local_target_distance_,
+        local_target_min_distance_,
+        [this](const Eigen::Vector2d& pos, double yaw) {
+          return kinoastar_->isCollisionPosYaw(pos, yaw);
+        },
+        local_pose);
+    if (!has_safe_local_pose) {
+      ROS_DEBUG_THROTTLE(1.0,
+          "[Real] Reject 2D A* frontier path: no footprint-safe local pose within %.2f m.",
+          local_target_distance_);
+      return false;
     }
-    return true;
+
+    refined_pos = refined_path.back();
+    return shouldAcceptRefinedFrontierGoal(start, refined_pos, 0.20);
   }
   return false;
 }
@@ -547,10 +583,13 @@ bool ExplorationManager::trySearchObjectPathWithDistance(const Vector2d& start2d
     Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path,
     const std::string& debug_msg)
 {
+  refined_path.clear();
   path_finder_->reset();
   if (path_finder_->astarSearch(start2d, object_pose, distance, max_search_time) ==
       Astar2D::REACH_END) {
     std::vector<Eigen::Vector2d> path = path_finder_->getPath();
+    if (path.empty())
+      return false;
     Vector2d tmp_pos(-1000.0, -1000.0);
 
     // Find valid position along the path (from end to start)
@@ -567,6 +606,30 @@ bool ExplorationManager::trySearchObjectPathWithDistance(const Vector2d& start2d
     path_finder_->reset();
     if (path_finder_->astarSearch(start2d, tmp_pos, 0.2, max_search_time) == Astar2D::REACH_END) {
       refined_path = path_finder_->getPath();
+      if (refined_path.empty())
+        return false;
+
+      // Object paths used to be checked only as point paths.  That allowed an
+      // object target to win navigation selection and then fail in the FSM's
+      // Go2 rectangular-footprint check on every retry.  Apply the same local
+      // feasibility test used for frontiers before accepting this object path.
+      PathPoseCandidate local_pose;
+      if (!selectFootprintSafeLocalTargetFromPath(
+              start2d,
+              refined_path,
+              local_target_distance_,
+              local_target_min_distance_,
+              [this](const Eigen::Vector2d& pos, double yaw) {
+                return kinoastar_->isCollisionPosYaw(pos, yaw);
+              },
+              local_pose)) {
+        ROS_WARN_THROTTLE(1.0,
+            "[Real] Reject object path: no footprint-safe local pose within %.2f m.",
+            local_target_distance_);
+        refined_path.clear();
+        return false;
+      }
+
       refined_pos = tmp_pos;
       if (!debug_msg.empty()) {
         ROS_WARN("%s", debug_msg.c_str());

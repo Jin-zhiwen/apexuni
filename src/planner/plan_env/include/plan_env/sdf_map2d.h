@@ -47,7 +47,8 @@ public:
   // Core map management functions
   void initMap(ros::NodeHandle& nh);
   void inputDepthCloud2D(const pcl::PointCloud<pcl::PointXY>::Ptr& occupied_points,
-      const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points, const Eigen::Vector3d& camera_pos,
+      const pcl::PointCloud<pcl::PointXY>::Ptr& raycast_points,
+      const pcl::PointCloud<pcl::PointXY>::Ptr& ray_stop_points, const Eigen::Vector3d& camera_pos,
       vector<Eigen::Vector2i>& free_grids,
       vector<Eigen::Vector2i>* semantic_free_grids = nullptr);
   void inputObjectCloud2D(
@@ -128,6 +129,7 @@ struct MapParam2D {
       min_occupancy_log_;  ///< Log-odds probability parameters
   double max_ray_length_;  ///< Maximum ray length for raycasting
   int ray_stop_dilation_;  ///< Dilate current-frame obstacle mask when stopping rays
+  bool stop_at_persistent_occupancy_;  ///< Prevent a ray from clearing through an existing obstacle
   double local_bound_;     ///< Local mapping boundary limit
   double unknown_flag_;    ///< Flag value for unknown regions
   int buffer_size_;        ///< Size of map data buffers
